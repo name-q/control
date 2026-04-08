@@ -1,216 +1,255 @@
-// macOS Screen Capture — ScreenCaptureKit + Tile-based Delta Encoding
+// macOS Screen Capture — ScreenCaptureKit + VideoToolbox H264 Encoding
 //
 // Protocol (stdout):
-//   READY:<screenW>:<screenH>:<tileSize>\n
-//   CURSOR:<x>:<y>\n                        — cursor position (every frame)
-//   FRAME:<totalLen>:<timestamp>:<type>\n<payload>
-//     type 1 (keyframe): full JPEG
-//     type 2 (delta):    [2B regionCount] + regions
-//     type 3 (skip):     empty
+//   READY:<screenW>:<screenH>\n
+//   CURSOR:<x>:<y>\n
+//   NALU:<len>:<ts>:<isKey>\n<h264Data>
 //
-// Args: capture [fps] [scale] [quality]
+// Protocol (stdin):
+//   KEYFRAME\n          — force IDR frame
+//   BITRATE:<bps>\n     — change target bitrate
+//
+// Args: capture [fps] [scale] [bitrate_kbps]
 
 import Cocoa
 import ScreenCaptureKit
 import CoreMedia
 import CoreGraphics
+import VideoToolbox
 import Foundation
 
 let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 30 : 30
-let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 0.75 : 0.75
-let quality = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 0.7 : 0.7
+let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 1 : 1
+let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 2000 : 2000
 
 let stdoutHandle = FileHandle.standardOutput
 let stderrHandle = FileHandle.standardError
-let TILE_SIZE = 64
 
 func log(_ msg: String) {
     stderrHandle.write(Data((msg + "\n").utf8))
 }
 
-class StreamOutput: NSObject, SCStreamOutput {
-    let context = CIContext(options: [.useSoftwareRenderer: false])
-    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-    var currentQuality: Double = quality
-    var jpegOpts: [CIImageRepresentationOption: Any] {
-        [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): currentQuality]
-    }
-    var prevHashes: [UInt64] = []
-    var gridCols = 0, gridRows = 0, frameCounter = 0
-    var forceKeyframe = true
-    let keyframeInterval = 30 // every 1s at 30fps — faster recovery from dropped deltas
+class H264Encoder {
+    var session: VTCompressionSession?
+    var forceKeyframe = false
+    let width: Int
+    let height: Int
 
-    func tileHash(_ ptr: UnsafePointer<UInt8>, bpr: Int, tx: Int, ty: Int, tw: Int, th: Int) -> UInt64 {
-        var h: UInt64 = 0xcbf29ce484222325; let p: UInt64 = 0x100000001b3
-        for row in stride(from: 0, to: th, by: 4) {
-            let base = ptr + (ty + row) * bpr + tx * 4
-            for col in stride(from: 0, to: tw, by: 4) {
-                let v = base.advanced(by: col * 4).withMemoryRebound(to: UInt32.self, capacity: 1) { $0.pointee }
-                h ^= UInt64(v); h &*= p
+    init(width: Int, height: Int, fps: Double, bitrate: Int) {
+        self.width = width
+        self.height = height
+
+        var s: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: nil,
+            width: Int32(width), height: Int32(height),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ] as CFDictionary,
+            compressedDataAllocator: nil,
+            outputCallback: nil,
+            refcon: nil,
+            compressionSessionOut: &s
+        )
+        guard status == noErr, let session = s else {
+            log("Failed to create VTCompressionSession: \(status)")
+            exit(1)
+        }
+        self.session = session
+
+        // Low-latency realtime encoding
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse) // no B-frames
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber) // 1 IDR per second
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
+
+        VTCompressionSessionPrepareToEncodeFrames(session)
+        log("H264 encoder: \(width)x\(height) @ \(Int(fps))fps, \(bitrate)kbps")
+    }
+
+    func setBitrate(_ bps: Int) {
+        guard let session = session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+        log("Bitrate updated: \(bps / 1000)kbps")
+    }
+
+    func encode(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
+        guard let session = session else { return }
+
+        var flags: VTEncodeInfoFlags = []
+        var properties: CFDictionary?
+
+        if forceKeyframe {
+            forceKeyframe = false
+            properties = [
+                kVTEncodeFrameOptionKey_ForceKeyFrame: true
+            ] as CFDictionary
+        }
+
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: timestamp,
+            duration: .invalid,
+            frameProperties: properties,
+            infoFlagsOut: &flags
+        ) { [self] status, flags, sampleBuffer in
+            guard status == noErr, let sb = sampleBuffer else { return }
+            self.outputNALU(sb)
+        }
+    }
+
+    func outputNALU(_ sampleBuffer: CMSampleBuffer) {
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+
+        let isKey = sampleBuffer.isKeyFrame
+        let ts = UInt64(Date().timeIntervalSince1970 * 1000)
+
+        // Get SPS/PPS from keyframes
+        if isKey, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            var spsData = Data()
+
+            // Extract SPS
+            var spsSize: Int = 0, spsCount: Int = 0
+            var spsPtr: UnsafePointer<UInt8>?
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(formatDesc, parameterSetIndex: 0, parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsSize, parameterSetCountOut: &spsCount, nalUnitHeaderLengthOut: nil) == noErr, let ptr = spsPtr {
+                // Annex-B start code + SPS
+                spsData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                spsData.append(ptr, count: spsSize)
+            }
+
+            // Extract PPS
+            var ppsSize: Int = 0
+            var ppsPtr: UnsafePointer<UInt8>?
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(formatDesc, parameterSetIndex: 1, parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsSize, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr, let ptr = ppsPtr {
+                spsData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                spsData.append(ptr, count: ppsSize)
+            }
+
+            if !spsData.isEmpty {
+                writeNALU(spsData, ts: ts, isKey: true)
             }
         }
-        return h
+
+        // Extract NAL units from data buffer (AVCC format → Annex-B)
+        var totalLength: Int = 0
+        CMBlockBufferGetDataLength(dataBuffer)
+        var lengthAtOffset: Int = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+
+        guard let ptr = dataPointer else { return }
+
+        var annexB = Data()
+        var offset = 0
+        while offset < totalLength {
+            // Read 4-byte AVCC length prefix
+            var naluLen: UInt32 = 0
+            memcpy(&naluLen, ptr + offset, 4)
+            naluLen = naluLen.bigEndian
+            offset += 4
+
+            // Annex-B start code + NALU data
+            annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            annexB.append(Data(bytes: ptr + offset, count: Int(naluLen)))
+            offset += Int(naluLen)
+        }
+
+        if !annexB.isEmpty {
+            writeNALU(annexB, ts: ts, isKey: isKey)
+        }
+    }
+
+    func writeNALU(_ data: Data, ts: UInt64, isKey: Bool) {
+        let header = Data("NALU:\(data.count):\(ts):\(isKey ? 1 : 0)\n".utf8)
+        stdoutHandle.write(header)
+        stdoutHandle.write(data)
+    }
+
+    deinit {
+        if let session = session {
+            VTCompressionSessionInvalidate(session)
+        }
+    }
+}
+
+extension CMSampleBuffer {
+    var isKeyFrame: Bool {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(self, createIfNecessary: false) as? [[CFString: Any]],
+              let first = attachments.first else { return true }
+        return !(first[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
+    }
+}
+class StreamOutput: NSObject, SCStreamOutput {
+    let encoder: H264Encoder
+    var frameCount = 0
+
+    init(encoder: H264Encoder) {
+        self.encoder = encoder
+        super.init()
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // Send cursor position (lightweight, every frame)
-        let mouseEvent = CGEvent(source: nil)
-        let cursorLoc = mouseEvent?.location ?? .zero
-        let cursorMsg = Data("CURSOR:\(Int(cursorLoc.x)):\(Int(cursorLoc.y))\n".utf8)
-        stdoutHandle.write(cursorMsg)
+        // Cursor position
+        let cursorLoc = CGEvent(source: nil)?.location ?? .zero
+        stdoutHandle.write(Data("CURSOR:\(Int(cursorLoc.x)):\(Int(cursorLoc.y))\n".utf8))
 
-        // Try to get raw pixel access for delta detection
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        let base = CVPixelBufferGetBaseAddress(pb)
-
-        if let base = base {
-            let ptr = base.assumingMemoryBound(to: UInt8.self)
-            processFrame(pb, ptr: ptr)
-            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
-        } else {
-            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
-            // No raw access — emit full keyframe via CIImage (no lock needed)
-            forceKeyframe = false
-            frameCounter += 1
-            let ci = CIImage(cvPixelBuffer: pb)
-            guard let jpeg = context.jpegRepresentation(of: ci, colorSpace: colorSpace, options: jpegOpts) else { return }
-            let ts = UInt64(Date().timeIntervalSince1970 * 1000)
-            stdoutHandle.write(Data("FRAME:\(jpeg.count):\(ts):1\n".utf8))
-            stdoutHandle.write(jpeg)
-        }
-    }
-
-    func processFrame(_ pb: CVPixelBuffer, ptr: UnsafePointer<UInt8>) {
-        let bpr = CVPixelBufferGetBytesPerRow(pb)
-        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
-        let cols = (w + TILE_SIZE - 1) / TILE_SIZE, rows = (h + TILE_SIZE - 1) / TILE_SIZE
-
-        if gridCols != cols || gridRows != rows {
-            gridCols = cols; gridRows = rows
-            prevHashes = [UInt64](repeating: 0, count: cols * rows)
-            forceKeyframe = true
-        }
-        frameCounter += 1
-        let ts = UInt64(Date().timeIntervalSince1970 * 1000)
-
-        var curHash = [UInt64](repeating: 0, count: cols * rows)
-        var dirty: [(Int, Int)] = []
-        for r in 0..<rows { for c in 0..<cols {
-            let tw = min(TILE_SIZE, w - c * TILE_SIZE), th = min(TILE_SIZE, h - r * TILE_SIZE)
-            let hash = tileHash(ptr, bpr: bpr, tx: c * TILE_SIZE, ty: r * TILE_SIZE, tw: tw, th: th)
-            curHash[r * cols + c] = hash
-            if hash != prevHashes[r * cols + c] { dirty.append((c, r)) }
-        }}
-        prevHashes = curHash
-
-        if forceKeyframe || frameCounter % keyframeInterval == 0 || dirty.count > cols * rows * 4 / 10 {
-            forceKeyframe = false; emitKeyframe(pb)
-        } else if dirty.isEmpty {
-            let hdr = Data("FRAME:0:\(ts):3\n".utf8); stdoutHandle.write(hdr)
-        } else {
-            forceKeyframe = false; emitDelta(pb, dirty: dirty, w: w, h: h, ts: ts)
-        }
-    }
-
-    func emitKeyframe(_ pb: CVPixelBuffer) {
-        let ci = CIImage(cvPixelBuffer: pb)
-        guard let jpeg = context.jpegRepresentation(of: ci, colorSpace: colorSpace, options: jpegOpts) else { return }
-        let ts = UInt64(Date().timeIntervalSince1970 * 1000)
-        stdoutHandle.write(Data("FRAME:\(jpeg.count):\(ts):1\n".utf8))
-        stdoutHandle.write(jpeg)
-    }
-
-    func emitDelta(_ pb: CVPixelBuffer, dirty: [(Int, Int)], w: Int, h: Int, ts: UInt64) {
-        var byRow: [Int: [Int]] = [:]
-        for (c, r) in dirty { byRow[r, default: []].append(c) }
-        var regions: [(x: Int, y: Int, w: Int, h: Int)] = []
-        for (row, colsArr) in byRow {
-            let sorted = colsArr.sorted(); var i = 0
-            while i < sorted.count {
-                let sc = sorted[i]; var ec = sc
-                while i + 1 < sorted.count && sorted[i+1] == ec + 1 { i += 1; ec = sorted[i] }
-                let rx = sc * TILE_SIZE, ry = row * TILE_SIZE
-                let rw = min((ec+1) * TILE_SIZE, w) - rx, rh = min((row+1) * TILE_SIZE, h) - ry
-                regions.append((rx, ry, rw, rh)); i += 1
-            }
-        }
-        let ci = CIImage(cvPixelBuffer: pb)
-        let imgH = CVPixelBufferGetHeight(pb)
-        var payload = Data()
-        var cnt = UInt16(regions.count).bigEndian; payload.append(Data(bytes: &cnt, count: 2))
-        for r in regions {
-            let fy = imgH - r.y - r.h
-            let cropped = ci.cropped(to: CGRect(x: r.x, y: fy, width: r.w, height: r.h))
-            let moved = cropped.transformed(by: CGAffineTransform(translationX: -CGFloat(r.x), y: -CGFloat(fy)))
-            guard let jpeg = context.jpegRepresentation(of: moved, colorSpace: colorSpace, options: jpegOpts) else { continue }
-            var x16 = UInt16(r.x).bigEndian, y16 = UInt16(r.y).bigEndian
-            var w16 = UInt16(r.w).bigEndian, h16 = UInt16(r.h).bigEndian
-            var l32 = UInt32(jpeg.count).bigEndian
-            payload.append(Data(bytes: &x16, count: 2)); payload.append(Data(bytes: &y16, count: 2))
-            payload.append(Data(bytes: &w16, count: 2)); payload.append(Data(bytes: &h16, count: 2))
-            payload.append(Data(bytes: &l32, count: 4)); payload.append(jpeg)
-        }
-        stdoutHandle.write(Data("FRAME:\(payload.count):\(ts):2\n".utf8))
-        stdoutHandle.write(payload)
+        // Encode frame
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        encoder.encode(pb, timestamp: pts)
+        frameCount += 1
     }
 }
 
 func startCapture() async throws {
-    // Request screen capture permission — triggers system dialog on first run
     if !CGRequestScreenCaptureAccess() {
-        log("Screen recording permission denied. Please grant access in System Settings → Privacy & Security → Screen Recording")
+        log("Screen recording permission denied")
         exit(1)
     }
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
     guard let display = content.displays.first else { log("No display"); exit(1) }
     let w = Int(Double(display.width) * scale), h = Int(Double(display.height) * scale)
+
+    let encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
+
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let config = SCStreamConfiguration()
     config.width = w; config.height = h
     config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
     config.queueDepth = 3; config.pixelFormat = kCVPixelFormatType_32BGRA; config.showsCursor = false
     let s = SCStream(filter: filter, configuration: config, delegate: nil)
-    let o = StreamOutput()
+    let o = StreamOutput(encoder: encoder)
     try s.addStreamOutput(o, type: .screen, sampleHandlerQueue: DispatchQueue(label: "cap"))
     try await s.startCapture()
-    stdoutHandle.write(Data("READY:\(display.width):\(display.height):\(TILE_SIZE)\n".utf8))
-    log("Streaming \(display.width)x\(display.height) -> \(w)x\(h) @ \(fps)fps")
 
-    // Poll stdin for commands (non-blocking) + keep alive
+    stdoutHandle.write(Data("READY:\(display.width):\(display.height)\n".utf8))
+    log("Streaming \(display.width)x\(display.height) -> \(w)x\(h) @ \(Int(fps))fps H264 \(defaultBitrate)kbps")
+
+    // stdin command loop (non-blocking poll)
     let stdinFd: Int32 = 0
     var stdinBuf = ""
     while true {
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        // Non-blocking check for stdin data
+        try await Task.sleep(nanoseconds: 100_000_000)
         var pfd = pollfd(fd: stdinFd, events: Int16(POLLIN), revents: 0)
         while poll(&pfd, 1, 0) > 0 && (pfd.revents & Int16(POLLIN) != 0) {
             var byte: [UInt8] = [0]
             let n = read(stdinFd, &byte, 1)
-            if n <= 0 { exit(0) } // EOF — parent died
+            if n <= 0 { exit(0) }
             stdinBuf += String(UnicodeScalar(byte[0]))
-            if byte[0] == 0x0a { // newline
+            if byte[0] == 0x0a {
                 let cmd = stdinBuf.trimmingCharacters(in: .whitespacesAndNewlines)
                 stdinBuf = ""
                 if cmd == "KEYFRAME" {
-                    o.forceKeyframe = true
-                } else if cmd.hasPrefix("QUALITY:") {
-                    let parts = cmd.split(separator: ":")
-                    if parts.count >= 3,
-                       let newScale = Double(parts[1]),
-                       let newQuality = Double(parts[2]) {
-                        let nw = Int(Double(display.width) * newScale)
-                        let nh = Int(Double(display.height) * newScale)
-                        let newConfig = SCStreamConfiguration()
-                        newConfig.width = nw; newConfig.height = nh
-                        newConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-                        newConfig.queueDepth = 3; newConfig.pixelFormat = kCVPixelFormatType_32BGRA; newConfig.showsCursor = false
-                        try? await s.updateConfiguration(newConfig)
-                        o.currentQuality = newQuality
-                        o.prevHashes = []
-                        o.forceKeyframe = true
-                        log("Quality updated: \(nw)x\(nh) q=\(newQuality)")
+                    encoder.forceKeyframe = true
+                } else if cmd.hasPrefix("BITRATE:") {
+                    if let bps = Int(cmd.split(separator: ":")[1]) {
+                        encoder.setBitrate(bps * 1000)
                     }
                 }
             }
@@ -218,7 +257,6 @@ func startCapture() async throws {
         }
     }
 }
-
 Task {
     do { try await startCapture() }
     catch { log("ERROR: \(error)"); exit(1) }
