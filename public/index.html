@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Remote Control</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:none;-webkit-user-select:none;user-select:none}
+html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;background:#000}
+
+/* Force landscape via CSS rotation when in portrait */
+#app{width:100vw;height:100vh;position:relative;overflow:hidden}
+@media (orientation: portrait){
+  #app{width:100vh;height:100vw;transform:rotate(90deg);transform-origin:top left;position:absolute;top:0;left:100vw}
+}
+
+/* Screen stream */
+#screenCanvas{width:100%;height:100%;position:relative;background:#000}
+#streamCanvas{position:absolute;transform-origin:0 0;display:block}
+#screenOverlay{position:absolute;inset:0;z-index:1}
+#cursor{position:absolute;z-index:2;pointer-events:none;width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.9);box-shadow:0 0 3px rgba(0,0,0,.6);transform:translate(-50%,-50%);display:none}
+#cursorRing{position:absolute;z-index:2;pointer-events:none;width:20px;height:20px;border-radius:50%;border:1.5px solid rgba(255,255,255,.4);transform:translate(-50%,-50%);display:none;transition:left 30ms linear,top 30ms linear}
+#cursorTrail{position:absolute;z-index:1;pointer-events:none;display:none}
+#cursorTrail canvas{position:absolute;top:0;left:0}
+
+/* Status */
+#status{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:20;font-size:11px;padding:3px 12px;border-radius:10px;background:rgba(0,0,0,.5);color:#0f0;backdrop-filter:blur(4px);cursor:pointer;white-space:nowrap}
+#status.disconnected{color:#f55}
+#qualityBadge{position:absolute;top:8px;right:12px;z-index:20;font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;backdrop-filter:blur(4px);cursor:pointer;letter-spacing:0.5px}
+
+/* Joystick */
+#joystickArea{position:absolute;bottom:20px;left:20px;z-index:20;width:120px;height:120px}
+#joystickBase{width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.15);position:relative}
+#joystickThumb{width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.25);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);transition:none}
+
+/* Keyboard input */
+#comboBtn{position:absolute;bottom:80px;right:20px;z-index:20;width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#kbBtn{position:absolute;bottom:28px;right:20px;z-index:20;width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#kbPanel{position:absolute;bottom:80px;right:12px;z-index:20;display:none;flex-direction:row;align-items:center;gap:6px;background:rgba(0,0,0,.7);padding:8px;border-radius:12px;backdrop-filter:blur(8px)}
+#kbPanel.open{display:flex}
+#kbInput{width:200px;height:36px;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.1);color:#fff;font-size:14px;padding:0 10px;outline:none}
+#kbSend{height:36px;padding:0 14px;border:none;border-radius:8px;background:#4a69bd;color:#fff;font-size:13px;font-weight:600;cursor:pointer}
+
+#comboBackdrop{display:none;position:absolute;inset:0;z-index:25;background:rgba(0,0,0,.4)}
+#comboBackdrop.open{display:block}
+#comboPanel{position:absolute;bottom:0;left:0;right:0;z-index:30;max-height:50vh;background:rgba(20,20,40,.95);border-top:1px solid rgba(255,255,255,.1);border-radius:14px 14px 0 0;backdrop-filter:blur(12px);transform:translateY(100%);transition:transform .25s ease-out;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 6px;padding-bottom:env(safe-area-inset-bottom,6px)}
+#comboPanel.open{transform:translateY(0)}
+#comboPanelHeader{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding:0 2px}
+#comboPreview{flex:1;font-size:13px;color:rgba(255,255,255,.4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#comboPreview.active{color:#fff;font-weight:600}
+#comboPanelActions{display:flex;gap:6px}
+#comboClear,#comboSend{height:30px;padding:0 12px;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer}
+#comboClear{background:rgba(255,255,255,.1);color:rgba(255,255,255,.6)}
+#comboSend{background:#4a69bd;color:#fff}
+#comboQuick{display:flex;gap:5px;overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch;scrollbar-width:none;justify-content:center}
+#comboQuick::-webkit-scrollbar{display:none}
+.combo-chip{flex-shrink:0;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.75);font-size:10px;white-space:nowrap;cursor:pointer}
+.combo-chip:active{background:rgba(74,105,189,.4)}
+#comboKeyboard{display:flex;flex-direction:column;gap:2px;align-items:center}
+.kb-row{display:flex;gap:2px;justify-content:center}
+.kb-key{height:26px;min-width:0;width:calc((100vw - 40px) / 14);max-width:32px;padding:0 1px;border-radius:4px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:rgba(255,255,255,.75);font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+@media (orientation: portrait){.kb-key{width:calc((100vh - 40px) / 14)}}
+.kb-key.wide{width:calc((100vw - 40px) / 11);max-width:44px}
+@media (orientation: portrait){.kb-key.wide{width:calc((100vh - 40px) / 11)}}
+.kb-key.wider{width:calc((100vw - 40px) / 9);max-width:52px}
+@media (orientation: portrait){.kb-key.wider{width:calc((100vh - 40px) / 9)}}
+.kb-key.space{width:calc((100vw - 40px) / 5);max-width:100px}
+@media (orientation: portrait){.kb-key.space{width:calc((100vh - 40px) / 5)}}
+.kb-key.selected{background:rgba(74,105,189,.5);border-color:rgba(74,105,189,.8);color:#fff}
+.kb-key:active{background:rgba(255,255,255,.15)}
+.kb-key.modifier{color:rgba(160,185,255,.85)}
+
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="status" class="disconnected">Connecting...</div>
+  <div id="qualityBadge">HD</div>
+  <div id="screenCanvas">
+    <canvas id="streamCanvas"></canvas>
+    <div id="screenOverlay"></div>
+    <div id="cursor"></div>
+    <div id="cursorRing"></div>
+    <div id="cursorTrail"><canvas></canvas></div>
+  </div>
+  <div id="joystickArea">
+    <div id="joystickBase"><div id="joystickThumb"></div></div>
+  </div>
+  <button id="comboBtn">⌨</button>
+  <button id="kbBtn">⏎</button>
+  <div id="kbPanel">
+    <input id="kbInput" type="text" placeholder="Type here..." autocomplete="off" autocorrect="off" autocapitalize="off">
+    <button id="kbSend">Send</button>
+  </div>
+  <div id="comboBackdrop"></div>
+  <div id="comboPanel">
+    <div id="comboPanelHeader">
+      <span id="comboPreview">Select keys...</span>
+      <div id="comboPanelActions"><button id="comboClear">Clear</button><button id="comboSend">Send</button></div>
+    </div>
+    <div id="comboQuick"></div>
+    <div id="comboKeyboard"></div>
+  </div>
+</div>
+<script>
+const LONG_PRESS_MS = 500;
+const MOVE_THRESHOLD = 5;
+const SCROLL_SENSITIVITY = 2;
+const JOYSTICK_SPEED = 8;
+const MULTI_TOUCH_DELAY = 80;
+
+// When CSS rotates the page 90deg in portrait, touch coords are still in the
+// original (portrait) coordinate system. This function maps them to the
+// rotated (landscape) coordinate system that the layout uses.
+function isPortrait() { return window.innerHeight > window.innerWidth; }
+function mapTouch(t) {
+  if (isPortrait()) {
+    // CSS: rotate(90deg), origin top-left, left:100vw
+    // Portrait screen: physical W < H. After rotation the "app" is H wide, W tall.
+    // Touch (cx, cy) in portrait → (cy, W - cx) in rotated layout
+    return { x: t.clientY, y: window.innerWidth - t.clientX };
+  }
+  return { x: t.clientX, y: t.clientY };
+}
+
+let ws, screenSize = { width: 1920, height: 1080 };
+const statusEl = document.getElementById('status');
+const screenCanvasEl = document.getElementById('screenCanvas');
+const streamCanvas = document.getElementById('streamCanvas');
+const ctx = streamCanvas.getContext('2d');
+const screenOverlay = document.getElementById('screenOverlay');
+const cursorEl = document.getElementById('cursor');
+
+// ========== WebSocket ==========
+let streaming = false, streamStarted = false;
+let latestFrameMsg = null; // ArrayBuffer with type header
+
+// FPS & latency tracking
+let showStats = false, fpsFrames = 0, fpsLast = Date.now(), fpsCurrent = 0;
+let latency = 0, pingSent = 0;
+let bwBytes = 0, bwLast = Date.now(), bwCurrent = 0;
+
+const QUALITY_PRESETS = [
+  { label: 'SD',   scale: 0.5,  quality: 0.6 },
+  { label: 'HD',   scale: 0.75, quality: 0.75 },
+  { label: 'FHD',  scale: 1,    quality: 0.8 },
+  { label: 'UHD',  scale: 2,    quality: 0.85 },
+];
+let qualityIdx = 2; // default FHD
+const qualityBadge = document.getElementById('qualityBadge');
+qualityBadge.textContent = QUALITY_PRESETS[qualityIdx].label;
+
+qualityBadge.addEventListener('click', (e) => {
+  e.stopPropagation();
+  qualityIdx = (qualityIdx + 1) % QUALITY_PRESETS.length;
+  const p = QUALITY_PRESETS[qualityIdx];
+  qualityBadge.textContent = p.label;
+  send('setQuality', { scale: p.scale, quality: p.quality });
+});
+
+statusEl.addEventListener('click', (e) => {
+  e.stopPropagation();
+  showStats = !showStats;
+  if (!showStats) statusEl.textContent = 'Connected';
+});
+
+function formatBW(bytesPerSec) {
+  if (bytesPerSec >= 1024 * 1024) return (bytesPerSec / 1024 / 1024).toFixed(1) + ' MB/s';
+  return Math.round(bytesPerSec / 1024) + ' KB/s';
+}
+
+function formatLatency(ms) {
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return ms + 'ms';
+}
+
+function updateStats() {
+  fpsFrames++;
+  const now = Date.now();
+  if (now - fpsLast >= 1000) {
+    fpsCurrent = fpsFrames;
+    fpsFrames = 0;
+    bwCurrent = bwBytes;
+    bwBytes = 0;
+    fpsLast = now;
+  }
+  if (showStats) {
+    statusEl.textContent = `${fpsCurrent} FPS · ${formatLatency(latency)} · ${formatBW(bwCurrent)}`;
+  }
+}
+
+function pingLoop() {
+  if (ws && ws.readyState === 1) {
+    pingSent = Date.now();
+    send('ping');
+  }
+  setTimeout(pingLoop, 2000);
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    statusEl.textContent = 'Connected'; statusEl.className = '';
+    send('startStream'); streaming = true;
+    pingLoop();
+  };
+  ws.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.className = 'disconnected'; streaming = false; setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      latestFrameMsg = e.data;
+      bwBytes += e.data.byteLength;
+      updateStats();
+      return;
+    }
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'screen') { screenSize = msg.data; serverPlatform = msg.data.platform || 'darwin'; initComboPanel(); }
+      if (msg.type === 'pong') latency = Date.now() - pingSent;
+      if (msg.type === 'cursor') updateCursor(msg.data);
+    } catch {}
+  };
+}
+connect();
+
+// Cursor rendering — separate from screen tiles, zero-latency CSS
+const cursorRing = document.getElementById('cursorRing');
+const trailContainer = document.getElementById('cursorTrail');
+const trailCanvas = trailContainer.querySelector('canvas');
+const trailCtx = trailCanvas.getContext('2d');
+let cursorPx = 0, cursorPy = 0;
+const trailPoints = []; // {x, y, t}
+const TRAIL_LIFETIME = 200; // ms
+
+function updateCursor(pos) {
+  if (!baseW || !screenSize.width) return;
+  const px = pos.x / screenSize.width * baseW * imgScale + imgX;
+  const py = pos.y / screenSize.height * baseH * imgScale + imgY;
+  cursorPx = px; cursorPy = py;
+  cursorEl.style.left = px + 'px';
+  cursorEl.style.top = py + 'px';
+  cursorEl.style.display = 'block';
+  cursorRing.style.left = px + 'px';
+  cursorRing.style.top = py + 'px';
+  cursorRing.style.display = 'block';
+  trailPoints.push({ x: px, y: py, t: Date.now() });
+}
+
+// Trail render loop
+function renderTrail() {
+  const now = Date.now();
+  // Prune old points
+  while (trailPoints.length && now - trailPoints[0].t > TRAIL_LIFETIME) trailPoints.shift();
+
+  const el = screenCanvasEl;
+  if (trailCanvas.width !== el.clientWidth || trailCanvas.height !== el.clientHeight) {
+    trailCanvas.width = el.clientWidth;
+    trailCanvas.height = el.clientHeight;
+    trailContainer.style.width = el.clientWidth + 'px';
+    trailContainer.style.height = el.clientHeight + 'px';
+    trailContainer.style.display = 'block';
+  }
+  trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+
+  if (trailPoints.length > 1) {
+    for (let i = 1; i < trailPoints.length; i++) {
+      const p = trailPoints[i], pp = trailPoints[i - 1];
+      const age = (now - p.t) / TRAIL_LIFETIME;
+      const alpha = (1 - age) * 0.4;
+      const width = (1 - age) * 3;
+      trailCtx.beginPath();
+      trailCtx.moveTo(pp.x, pp.y);
+      trailCtx.lineTo(p.x, p.y);
+      trailCtx.strokeStyle = `rgba(255,255,255,${alpha})`;
+      trailCtx.lineWidth = width;
+      trailCtx.lineCap = 'round';
+      trailCtx.stroke();
+    }
+  }
+  requestAnimationFrame(renderTrail);
+}
+renderTrail();
+
+// Click ripple effect
+function cursorRipple(color) {
+  const ripple = document.createElement('div');
+  ripple.style.cssText = `position:absolute;z-index:3;pointer-events:none;left:${cursorPx}px;top:${cursorPy}px;width:8px;height:8px;border-radius:50%;border:2px solid ${color};transform:translate(-50%,-50%);opacity:1;transition:all .3s ease-out;`;
+  screenCanvasEl.appendChild(ripple);
+  requestAnimationFrame(() => {
+    ripple.style.width = '30px'; ripple.style.height = '30px';
+    ripple.style.opacity = '0';
+  });
+  setTimeout(() => ripple.remove(), 350);
+}
+
+// Render loop: decode and composite frames on canvas
+let rendering = false;
+let lastCanvasW = 0, lastCanvasH = 0;
+let renderGeneration = 0; // increments on each new frame, allows abandoning stale renders
+
+async function handleKeyframe(data, gen) {
+  const blob = new Blob([data], { type: 'image/jpeg' });
+  const bitmap = await createImageBitmap(blob);
+  if (gen !== renderGeneration) { if (bitmap.close) bitmap.close(); return; }
+  streamCanvas.width = bitmap.width;
+  streamCanvas.height = bitmap.height;
+  ctx.drawImage(bitmap, 0, 0);
+  if (bitmap.close) bitmap.close();
+  if (!streamStarted || bitmap.width !== lastCanvasW || bitmap.height !== lastCanvasH) {
+    lastCanvasW = bitmap.width; lastCanvasH = bitmap.height;
+    fitImage();
+  }
+  streamStarted = true;
+}
+
+async function handleDelta(buffer, gen) {
+  const view = new DataView(buffer);
+  const regionCount = view.getUint16(0);
+  let offset = 2;
+  const regions = [];
+  for (let i = 0; i < regionCount; i++) {
+    const x = view.getUint16(offset); offset += 2;
+    const y = view.getUint16(offset); offset += 2;
+    const w = view.getUint16(offset); offset += 2;
+    const h = view.getUint16(offset); offset += 2;
+    const jpegLen = view.getUint32(offset); offset += 4;
+    const jpegData = buffer.slice(offset, offset + jpegLen); offset += jpegLen;
+    regions.push({ x, y, blob: new Blob([jpegData], { type: 'image/jpeg' }) });
+  }
+  // Decode in batches of 8 to avoid overwhelming the browser
+  for (let i = 0; i < regions.length; i += 8) {
+    if (gen !== renderGeneration) return; // newer frame arrived, abandon this one
+    const batch = regions.slice(i, i + 8);
+    const bitmaps = await Promise.all(batch.map(d => createImageBitmap(d.blob)));
+    for (let j = 0; j < batch.length; j++) {
+      ctx.drawImage(bitmaps[j], batch[j].x, batch[j].y);
+      if (bitmaps[j].close) bitmaps[j].close();
+    }
+  }
+}
+
+(function renderLoop() {
+  if (!rendering && latestFrameMsg) {
+    rendering = true;
+    const msg = latestFrameMsg;
+    latestFrameMsg = null;
+    renderGeneration++;
+    const gen = renderGeneration;
+    const type = new Uint8Array(msg)[0];
+    const payload = msg.slice(1);
+    const p = type === 1 ? handleKeyframe(payload, gen) : type === 2 ? handleDelta(payload, gen) : Promise.resolve();
+    p.then(() => { rendering = false; }).catch((e) => { console.error('render error', e); rendering = false; });
+  }
+  requestAnimationFrame(renderLoop);
+})();
+
+function send(type, data = {}) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type, data }));
+}
+
+// ========== Screen fit / zoom / pan ==========
+let imgScale = 1, imgX = 0, imgY = 0, baseW = 0, baseH = 0;
+
+function fitImage() {
+  const cw = screenCanvasEl.clientWidth, ch = screenCanvasEl.clientHeight;
+  if (!cw || !ch || !screenSize.width) return;
+  const ratio = screenSize.width / screenSize.height;
+  if (cw / ch > ratio) { baseH = ch; baseW = ch * ratio; }
+  else { baseW = cw; baseH = cw / ratio; }
+  imgScale = 1; imgX = (cw - baseW) / 2; imgY = (ch - baseH) / 2;
+  applyTransform();
+}
+function applyTransform() {
+  const w = baseW * imgScale, h = baseH * imgScale;
+  streamCanvas.style.width = w + 'px';
+  streamCanvas.style.height = h + 'px';
+  streamCanvas.style.transform = `translate(${imgX}px,${imgY}px)`;
+}
+function clampPan() {
+  const cw = screenCanvasEl.clientWidth, ch = screenCanvasEl.clientHeight;
+  const w = baseW * imgScale, h = baseH * imgScale;
+  imgX = w <= cw ? (cw - w) / 2 : Math.min(0, Math.max(cw - w, imgX));
+  imgY = h <= ch ? (ch - h) / 2 : Math.min(0, Math.max(ch - h, imgY));
+}
+window.addEventListener('resize', () => setTimeout(fitImage, 100));
+
+// ========== Screen overlay touch ==========
+let screenTouch = null;
+
+function touchToScreen(cx, cy) {
+  // cx, cy are already in rotated coordinate system (via mapTouch)
+  const sx = (cx - imgX) / (baseW * imgScale) * screenSize.width;
+  const sy = (cy - imgY) / (baseH * imgScale) * screenSize.height;
+  return { x: Math.round(sx), y: Math.round(sy), valid: sx >= 0 && sx <= screenSize.width && sy >= 0 && sy <= screenSize.height };
+}
+function pinchDist(a, b) {
+  const ma = mapTouch(a), mb = mapTouch(b);
+  return Math.hypot(mb.x - ma.x, mb.y - ma.y);
+}
+function pinchCenter(a, b) {
+  const ma = mapTouch(a), mb = mapTouch(b);
+  return { x: (ma.x + mb.x) / 2, y: (ma.y + mb.y) / 2 };
+}
+
+function startTwoFinger(e) {
+  if (screenTouch && screenTouch.longPressTimer) clearTimeout(screenTouch.longPressTimer);
+  if (screenTouch && screenTouch.waitTimer) clearTimeout(screenTouch.waitTimer);
+  const t0 = e.touches[0], t1 = e.touches[1];
+  const c = pinchCenter(t0, t1);
+  screenTouch = { mode:'twofinger', startDist:pinchDist(t0,t1), startScale:imgScale,
+    lastMx:c.x, lastMy:c.y, startMx:c.x, startMy:c.y, moved:false, isPinch:false };
+}
+
+screenOverlay.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2) { startTwoFinger(e); return; }
+  if (e.touches.length === 1) {
+    const m = mapTouch(e.touches[0]), pos = touchToScreen(m.x, m.y);
+    screenTouch = { mode:'pending', startX:m.x, startY:m.y, moved:false, startTime:Date.now(), pos, longPressTimer:null, longPressed:false, waitTimer:null };
+    screenTouch.waitTimer = setTimeout(() => {
+      if (screenTouch && screenTouch.mode === 'pending') {
+        screenTouch.mode = 'single';
+        if (pos.valid) send('moveTo', { x:pos.x, y:pos.y });
+        screenTouch.longPressTimer = setTimeout(() => {
+          if (screenTouch && !screenTouch.moved) { screenTouch.longPressed = true; send('mouseDown'); navigator.vibrate && navigator.vibrate(30); }
+        }, LONG_PRESS_MS - MULTI_TOUCH_DELAY);
+      }
+    }, MULTI_TOUCH_DELAY);
+  }
+}, { passive: false });
+
+screenOverlay.addEventListener('touchmove', (e) => {
+  e.preventDefault(); if (!screenTouch) return;
+  if (screenTouch.mode === 'pending' && e.touches.length === 1) {
+    const m = mapTouch(e.touches[0]);
+    if (Math.abs(m.x-screenTouch.startX) > MOVE_THRESHOLD || Math.abs(m.y-screenTouch.startY) > MOVE_THRESHOLD) {
+      if (screenTouch.waitTimer) clearTimeout(screenTouch.waitTimer);
+      screenTouch.mode = 'single'; screenTouch.moved = true;
+      const pos = touchToScreen(m.x, m.y);
+      if (pos.valid) send('moveTo', { x:pos.x, y:pos.y });
+    }
+    return;
+  }
+  if (screenTouch.mode === 'single' && e.touches.length === 1) {
+    const m = mapTouch(e.touches[0]);
+    if (Math.abs(m.x-screenTouch.startX) > MOVE_THRESHOLD || Math.abs(m.y-screenTouch.startY) > MOVE_THRESHOLD) {
+      screenTouch.moved = true;
+      if (screenTouch.longPressTimer) { clearTimeout(screenTouch.longPressTimer); screenTouch.longPressTimer = null; }
+    }
+    const pos = touchToScreen(m.x, m.y);
+    if (pos.valid) send('moveTo', { x:pos.x, y:pos.y });
+  } else if (screenTouch.mode === 'twofinger' && e.touches.length === 2) {
+    const t0 = e.touches[0], t1 = e.touches[1];
+    const dist = pinchDist(t0, t1);
+    const c = pinchCenter(t0, t1);
+    const distRatio = dist / screenTouch.startDist;
+
+    // Determine scroll vs pinch: compare finger distance change vs center movement
+    const distChange = Math.abs(dist - screenTouch.startDist);
+    const panDist = Math.hypot(c.x - screenTouch.startMx, c.y - screenTouch.startMy);
+
+    if (!screenTouch.isPinch && distChange > 40 && distChange > panDist * 1.5) {
+      screenTouch.isPinch = true;
+    }
+
+    if (screenTouch.isPinch) {
+      // Zoom
+      const newScale = Math.max(1, Math.min(5, screenTouch.startScale * distRatio));
+      imgX += (screenTouch.startMx - imgX) * (1 - newScale / imgScale);
+      imgY += (screenTouch.startMy - imgY) * (1 - newScale / imgScale);
+      imgScale = newScale;
+      imgX += c.x - screenTouch.lastMx; imgY += c.y - screenTouch.lastMy;
+      screenTouch.lastMx = c.x; screenTouch.lastMy = c.y;
+      clampPan(); applyTransform();
+    } else {
+      // Scroll
+      const dy = (c.y - screenTouch.lastMy) * SCROLL_SENSITIVITY;
+      const dx = (c.x - screenTouch.lastMx) * SCROLL_SENSITIVITY;
+      screenTouch.lastMx = c.x; screenTouch.lastMy = c.y;
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) send('scroll', { dx, dy });
+    }
+    screenTouch.moved = true;
+  }
+}, { passive: false });
+
+screenOverlay.addEventListener('touchend', (e) => {
+  e.preventDefault(); if (!screenTouch) return;
+  if (screenTouch.waitTimer) clearTimeout(screenTouch.waitTimer);
+  if (screenTouch.longPressTimer) clearTimeout(screenTouch.longPressTimer);
+  if (screenTouch.mode === 'pending' || screenTouch.mode === 'single') {
+    if (screenTouch.longPressed) send('mouseUp');
+    else if (!screenTouch.moved && Date.now() - screenTouch.startTime < 400) {
+      if (screenTouch.pos && screenTouch.pos.valid) send('moveTo', screenTouch.pos);
+      send('click'); cursorRipple('rgba(255,255,255,.8)');
+    }
+  }
+  if (screenTouch.mode === 'twofinger' && !screenTouch.moved) { imgScale = 1; fitImage(); }
+  screenTouch = null;
+});
+screenOverlay.addEventListener('touchcancel', () => {
+  if (screenTouch) {
+    if (screenTouch.waitTimer) clearTimeout(screenTouch.waitTimer);
+    if (screenTouch.longPressTimer) clearTimeout(screenTouch.longPressTimer);
+    if (screenTouch.longPressed) send('mouseUp');
+  }
+  screenTouch = null;
+});
+
+// ========== Joystick ==========
+const joystickBase = document.getElementById('joystickBase');
+const joystickThumb = document.getElementById('joystickThumb');
+const JOYSTICK_R = 60, THUMB_R = 25, MAX_R = JOYSTICK_R - THUMB_R;
+const JOY_SPEED = 18; // max px/frame at full tilt
+let joyActive = false, joyDx = 0, joyDy = 0, joyRaf = null, joyStartTime = 0;
+
+function joystickLoop() {
+  if (!joyActive) { joyRaf = null; return; }
+  const tilt = Math.hypot(joyDx, joyDy);
+  if (tilt > 0.05) {
+    // Cubic curve: gentle at low tilt, fast at full tilt
+    const speed = JOY_SPEED * tilt * tilt;
+    const nx = joyDx / tilt * speed, ny = joyDy / tilt * speed;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'move', data: { dx: nx, dy: ny } }));
+  }
+  joyRaf = requestAnimationFrame(joystickLoop);
+}
+
+let joyCenterX = 0, joyCenterY = 0, joyMoved = false, joyLongPressed = false, joyLongTimer = null;
+let joyLastTapTime = 0;
+
+joystickBase.addEventListener('touchstart', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  joyActive = true;
+  joyMoved = false;
+  joyLongPressed = false;
+  joyCenterX = e.touches[0].clientX;
+  joyCenterY = e.touches[0].clientY;
+  joyDx = 0; joyDy = 0;
+  joyStartTime = Date.now();
+  joyLongTimer = setTimeout(() => {
+    if (!joyMoved) {
+      joyLongPressed = true;
+      send('mouseDown');
+      navigator.vibrate && navigator.vibrate(30);
+    }
+  }, LONG_PRESS_MS);
+  if (!joyRaf) joyRaf = requestAnimationFrame(joystickLoop);
+}, { passive: false });
+
+joystickBase.addEventListener('touchmove', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  const t = e.touches[0];
+  const dist = Math.hypot(t.clientX - joyCenterX, t.clientY - joyCenterY);
+  if (dist > MOVE_THRESHOLD) {
+    joyMoved = true;
+    if (joyLongTimer) { clearTimeout(joyLongTimer); joyLongTimer = null; }
+  }
+  updateJoystick(t);
+}, { passive: false });
+
+joystickBase.addEventListener('touchend', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  if (joyLongTimer) { clearTimeout(joyLongTimer); joyLongTimer = null; }
+  if (joyLongPressed) {
+    send('mouseUp');
+  } else if (!joyMoved && Date.now() - joyStartTime < 300) {
+    const now = Date.now();
+    if (now - joyLastTapTime < 350) {
+      send('rightClick'); cursorRipple('rgba(100,180,255,.8)');
+      joyLastTapTime = 0;
+    } else {
+      send('click'); cursorRipple('rgba(255,255,255,.8)');
+      joyLastTapTime = now;
+    }
+  }
+  joyActive = false; joyDx = 0; joyDy = 0; joyLongPressed = false;
+  joystickThumb.style.transform = 'translate(-50%,-50%)';
+});
+joystickBase.addEventListener('touchcancel', (e) => {
+  if (joyLongTimer) { clearTimeout(joyLongTimer); joyLongTimer = null; }
+  if (joyLongPressed) send('mouseUp');
+  joyActive = false; joyDx = 0; joyDy = 0; joyLongPressed = false;
+  joystickThumb.style.transform = 'translate(-50%,-50%)';
+});
+
+function updateJoystick(t) {
+  let dx = t.clientX - joyCenterX, dy = t.clientY - joyCenterY;
+  const dist = Math.hypot(dx, dy);
+  if (dist > MAX_R) { dx = dx / dist * MAX_R; dy = dy / dist * MAX_R; }
+
+  // Visual: CSS rotate(90deg) rotates element's local axes
+  // viewport dx,dy → element local: need to rotate -90deg = (dy, -dx)
+  if (isPortrait()) {
+    joystickThumb.style.transform = `translate(calc(-50% + ${dy}px), calc(-50% + ${-dx}px))`;
+    joyDx = dy / MAX_R; joyDy = -dx / MAX_R;
+  } else {
+    joystickThumb.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+    joyDx = dx / MAX_R; joyDy = dy / MAX_R;
+  }
+}
+
+// ========== Keyboard input ==========
+const kbBtn = document.getElementById('kbBtn');
+const kbPanel = document.getElementById('kbPanel');
+const kbInput = document.getElementById('kbInput');
+const kbSend = document.getElementById('kbSend');
+
+kbBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  kbPanel.classList.toggle('open');
+  if (kbPanel.classList.contains('open')) kbInput.focus();
+});
+
+function sendText() {
+  const text = kbInput.value;
+  if (text) { send('typeText', { text }); kbInput.value = ''; }
+}
+kbSend.addEventListener('click', (e) => { e.stopPropagation(); sendText(); });
+kbInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { e.preventDefault(); sendText(); }
+});
+// Prevent touch events on input panel from reaching overlay
+kbPanel.addEventListener('touchstart', (e) => e.stopPropagation());
+kbPanel.addEventListener('touchmove', (e) => e.stopPropagation());
+kbInput.addEventListener('touchstart', (e) => e.stopPropagation());
+
+// ========== Combo Key Panel ==========
+let serverPlatform = 'darwin';
+const KEY_MAP = {
+  'Cmd':   {mac:'command', win:0x5B, type:'modifier', label:{mac:'⌘',win:'Win'}},
+  'Ctrl':  {mac:'control', win:0x11, type:'modifier', label:{mac:'⌃',win:'Ctrl'}},
+  'Alt':   {mac:'option',  win:0x12, type:'modifier', label:{mac:'⌥',win:'Alt'}},
+  'Shift': {mac:'shift',   win:0x10, type:'modifier', label:{mac:'⇧',win:'Shift'}},
+  'Esc':{mac:53,win:0x1B},'F1':{mac:122,win:0x70},'F2':{mac:120,win:0x71},'F3':{mac:99,win:0x72},
+  'F4':{mac:118,win:0x73},'F5':{mac:96,win:0x74},'F6':{mac:97,win:0x75},'F7':{mac:98,win:0x76},
+  'F8':{mac:100,win:0x77},'F9':{mac:101,win:0x78},'F10':{mac:109,win:0x79},'F11':{mac:103,win:0x7A},'F12':{mac:111,win:0x7B},
+  '1':{mac:18,win:0x31},'2':{mac:19,win:0x32},'3':{mac:20,win:0x33},'4':{mac:21,win:0x34},'5':{mac:23,win:0x35},
+  '6':{mac:22,win:0x36},'7':{mac:26,win:0x37},'8':{mac:28,win:0x38},'9':{mac:25,win:0x39},'0':{mac:29,win:0x30},
+  'Q':{mac:12,win:0x51},'W':{mac:13,win:0x57},'E':{mac:14,win:0x45},'R':{mac:15,win:0x52},'T':{mac:17,win:0x54},
+  'Y':{mac:16,win:0x59},'U':{mac:32,win:0x55},'I':{mac:34,win:0x49},'O':{mac:31,win:0x4F},'P':{mac:35,win:0x50},
+  'A':{mac:0,win:0x41},'S':{mac:1,win:0x53},'D':{mac:2,win:0x44},'F':{mac:3,win:0x46},'G':{mac:5,win:0x47},
+  'H':{mac:4,win:0x48},'J':{mac:38,win:0x4A},'K':{mac:40,win:0x4B},'L':{mac:37,win:0x4C},
+  'Z':{mac:6,win:0x5A},'X':{mac:7,win:0x58},'C':{mac:8,win:0x43},'V':{mac:9,win:0x56},'B':{mac:11,win:0x42},
+  'N':{mac:45,win:0x4E},'M':{mac:46,win:0x4D},
+  'Tab':{mac:48,win:0x09},'Caps':{mac:57,win:0x14},'Space':{mac:49,win:0x20},'Enter':{mac:36,win:0x0D},
+  'Delete':{mac:51,win:0x08},'Del':{mac:117,win:0x2E},
+  '←':{mac:123,win:0x25},'↑':{mac:126,win:0x26},'→':{mac:124,win:0x27},'↓':{mac:125,win:0x28},
+};
+const QUICK_COMBOS = [
+  {keys:['Cmd','C'],     winKeys:['Ctrl','C']},
+  {keys:['Cmd','V'],     winKeys:['Ctrl','V']},
+  {keys:['Cmd','Z'],     winKeys:['Ctrl','Z']},
+  {keys:['Cmd','A'],     winKeys:['Ctrl','A']},
+  {keys:['Cmd','X'],     winKeys:['Ctrl','X']},
+  {keys:['Cmd','S'],     winKeys:['Ctrl','S']},
+  {keys:['Cmd','F'],     winKeys:['Ctrl','F']},
+  {keys:['Cmd','Tab'],   winKeys:['Alt','Tab']},
+  {keys:['Cmd','Q'],     winKeys:['Alt','F4']},
+  {keys:null,            winKeys:['Ctrl','Alt','Del'],macHidden:true},
+];
+const KB_ROWS = [
+  ['Esc','F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12','Del'],
+  ['1','2','3','4','5','6','7','8','9','0','Delete'],
+  ['Tab','Q','W','E','R','T','Y','U','I','O','P'],
+  ['Caps','A','S','D','F','G','H','J','K','L','Enter'],
+  ['Shift','Z','X','C','V','B','N','M'],
+  ['Ctrl','Alt','Cmd','Space','←','↑','↓','→'],
+];
+const WIDE_KEYS = new Set(['Tab','Caps','Shift','Enter','Delete','Del']);
+const WIDER_KEYS = new Set(['Ctrl','Alt','Cmd']);
+
+let selectedKeys = [];
+const comboBtn = document.getElementById('comboBtn');
+const comboPanel = document.getElementById('comboPanel');
+const comboBackdrop = document.getElementById('comboBackdrop');
+const comboPreview = document.getElementById('comboPreview');
+const comboClearBtn = document.getElementById('comboClear');
+const comboSendBtn = document.getElementById('comboSend');
+const comboQuick = document.getElementById('comboQuick');
+const comboKeyboard = document.getElementById('comboKeyboard');
+
+function openCombo() { comboPanel.classList.add('open'); comboBackdrop.classList.add('open'); }
+function closeCombo() { comboPanel.classList.remove('open'); comboBackdrop.classList.remove('open'); clearComboSelection(); }
+comboBtn.addEventListener('click', (e) => { e.stopPropagation(); comboPanel.classList.contains('open') ? closeCombo() : openCombo(); });
+comboBackdrop.addEventListener('click', closeCombo);
+comboPanel.addEventListener('touchstart', (e) => e.stopPropagation());
+comboPanel.addEventListener('touchmove', (e) => e.stopPropagation());
+
+function keyLabel(name) {
+  const km = KEY_MAP[name]; if (!km) return name;
+  const isMac = serverPlatform === 'darwin';
+  return (km.type === 'modifier' && km.label) ? (isMac ? km.label.mac : km.label.win) : name;
+}
+
+function buildQuickCombos() {
+  comboQuick.innerHTML = '';
+  const isMac = serverPlatform === 'darwin';
+  for (const c of QUICK_COMBOS) {
+    if (isMac && c.macHidden) continue;
+    if (!isMac && !c.winKeys) continue;
+    const keys = isMac ? c.keys : c.winKeys;
+    const chip = document.createElement('div');
+    chip.className = 'combo-chip';
+    chip.textContent = keys.map(keyLabel).join('+');
+    chip.addEventListener('click', () => { sendCombo(keys); chipFlash(chip); });
+    comboQuick.appendChild(chip);
+  }
+}
+
+function chipFlash(el) { el.style.background = 'rgba(74,105,189,.5)'; setTimeout(() => el.style.background = '', 200); }
+
+function buildKeyboard() {
+  comboKeyboard.innerHTML = '';
+  for (const row of KB_ROWS) {
+    const rowEl = document.createElement('div'); rowEl.className = 'kb-row';
+    for (const name of row) {
+      if (!KEY_MAP[name]) continue;
+      const btn = document.createElement('div'); btn.className = 'kb-key';
+      if (WIDE_KEYS.has(name)) btn.classList.add('wide');
+      if (WIDER_KEYS.has(name)) btn.classList.add('wider');
+      if (name === 'Space') btn.classList.add('space');
+      if (KEY_MAP[name].type === 'modifier') btn.classList.add('modifier');
+      btn.textContent = keyLabel(name);
+      btn.dataset.key = name;
+      btn.addEventListener('click', () => toggleComboKey(name, btn));
+      rowEl.appendChild(btn);
+    }
+    comboKeyboard.appendChild(rowEl);
+  }
+}
+
+function toggleComboKey(name, el) {
+  const idx = selectedKeys.indexOf(name);
+  if (idx >= 0) { selectedKeys.splice(idx, 1); el.classList.remove('selected'); }
+  else { selectedKeys.push(name); el.classList.add('selected'); }
+  updateComboPreview();
+}
+
+function clearComboSelection() {
+  selectedKeys = [];
+  comboKeyboard.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
+  updateComboPreview();
+}
+
+function updateComboPreview() {
+  if (!selectedKeys.length) { comboPreview.textContent = 'Select keys...'; comboPreview.classList.remove('active'); }
+  else { comboPreview.textContent = selectedKeys.map(keyLabel).join(' + '); comboPreview.classList.add('active'); }
+}
+
+comboClearBtn.addEventListener('click', clearComboSelection);
+comboSendBtn.addEventListener('click', () => { if (selectedKeys.length) sendCombo(selectedKeys); });
+
+function sendCombo(keys) {
+  const isMac = serverPlatform === 'darwin';
+  const mods = [], mainKey = keys.filter(k => KEY_MAP[k] && KEY_MAP[k].type !== 'modifier').pop();
+  if (!mainKey) return;
+  for (const k of keys) {
+    const km = KEY_MAP[k];
+    if (km.type === 'modifier') mods.push(isMac ? km.mac : km.win);
+  }
+  const keyCode = isMac ? KEY_MAP[mainKey].mac : KEY_MAP[mainKey].win;
+  send('combo', { keyCode, modifiers: mods });
+  comboSendBtn.style.background = '#6a89dd'; setTimeout(() => comboSendBtn.style.background = '', 150);
+  clearComboSelection();
+}
+
+function initComboPanel() {
+  buildQuickCombos();
+  buildKeyboard();
+}
+initComboPanel();
+</script>
+</body>
+</html>

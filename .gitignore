@@ -1,0 +1,8 @@
+node_modules/
+capture/macos/capture
+capture/macos/test_minimal
+capture/macos/test_minimal.swift
+capture/macos/ScreenCapture.app/Contents/MacOS/capture
+capture/macos/ScreenCapture.app/Contents/_CodeSignature/
+capture/windows/capture.exe
+.claude/
