@@ -128,6 +128,9 @@ function createStream(opts = {}) {
     });
 
     pc.onStateChange((state) => console.log('[stream] connection:', state));
+    pc.onIceStateChange((state) => console.log('[stream] ICE:', state));
+    pc.onGatheringStateChange((state) => console.log('[stream] gathering:', state));
+    pc.onSignalingStateChange((state) => console.log('[stream] signaling:', state));
 
     track.onOpen(() => console.log('[stream] Track open'));
 
@@ -160,9 +163,9 @@ function createStream(opts = {}) {
 
   function handleIce(ws, candidate) {
     const peer = peers.get(ws);
-    // Browser sends { candidate: "candidate:...", sdpMid: "0" }
     const c = candidate.candidate || candidate;
     const mid = candidate.sdpMid || '0';
+    console.log('[stream] handleIce: c=' + c.substring(0, 60) + ' mid=' + mid);
     if (peer) {
       try { peer.pc.addRemoteCandidate(c, mid); } catch (e) { console.error('[stream] ICE err:', e.message); }
     } else {

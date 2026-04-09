@@ -243,6 +243,8 @@ function wsSend(type, data = {}) {
 
 // ========== WebRTC ==========
 // ========== WebRTC (browser is answerer) ==========
+let pendingServerIce = [];
+
 async function handleServerOffer(sdp) {
   if (pc) { pc.close(); pc = null; }
 
@@ -265,6 +267,13 @@ async function handleServerOffer(sdp) {
   pc.oniceconnectionstatechange = () => console.log('ICE:', pc.iceConnectionState);
 
   await pc.setRemoteDescription({ type: 'offer', sdp });
+
+  // Flush any ICE candidates that arrived before the offer
+  for (const c of pendingServerIce) {
+    try { await pc.addIceCandidate(c); } catch {}
+  }
+  pendingServerIce = [];
+
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
@@ -272,8 +281,11 @@ async function handleServerOffer(sdp) {
 }
 
 async function handleRemoteIce(candidate) {
-  if (pc) {
+  if (pc && pc.remoteDescription) {
     try { await pc.addIceCandidate(candidate); } catch {}
+  } else {
+    // Buffer — offer not processed yet
+    pendingServerIce.push(candidate);
   }
 }
 
