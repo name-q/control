@@ -54,7 +54,6 @@ const MIME = {
 function getLocalIP() {
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
-    // Skip virtual/tunnel interfaces (VPN, Clash, etc.)
     if (name.startsWith('utun') || name.startsWith('tun') || name.startsWith('tap') || name.startsWith('vir')) continue;
     for (const iface of interfaces[name]) {
       if (iface.family === 'IPv4' && !iface.internal) return iface.address;
@@ -63,7 +62,39 @@ function getLocalIP() {
   return '127.0.0.1';
 }
 
+// Detect VPN/proxy TUN hijacking and fix LAN routing
+function ensureLanRoute(localIP) {
+  if (os.platform() !== 'darwin') return;
+  try {
+    const { execSync } = require('child_process');
+    // Check if a nearby but different subnet is routed through TUN
+    // e.g., if we're 10.22.11.x, check if 10.22.12.x goes through utun
+    const prefix = localIP.split('.').slice(0, 2).join('.');
+    const testIP = prefix + '.0.1';
+    const routeCheck = execSync(`route -n get ${testIP} 2>/dev/null`, { encoding: 'utf8' });
+    if (routeCheck.includes('utun') || routeCheck.includes('tun')) {
+      const subnet = prefix + '.0.0/16';
+      const gateway = execSync(`netstat -rn | grep "^default.*en0" | awk '{print $2}'`, { encoding: 'utf8' }).trim();
+      if (gateway) {
+        console.log(`[network] VPN/proxy TUN detected — LAN traffic (${subnet}) routed through VPN`);
+        try {
+          execSync(`sudo -n route add -net ${subnet} ${gateway} 2>/dev/null`);
+          console.log('[network] LAN route added');
+        } catch {
+          try {
+            execSync(`osascript -e 'do shell script "route add -net ${subnet} ${gateway}" with administrator privileges'`);
+            console.log('[network] LAN route added');
+          } catch {
+            console.log(`[network] Please run: sudo route add -net ${subnet} ${gateway}`);
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
 const localIP = getLocalIP();
+ensureLanRoute(localIP);
 const stream = createStream({ bindAddress: localIP });
 
 const server = http.createServer((req, res) => {
