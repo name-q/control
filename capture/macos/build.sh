@@ -5,7 +5,7 @@ swiftc -O -o capture capture.swift \
   -framework ScreenCaptureKit \
   -framework CoreMedia \
   -framework CoreGraphics \
-  -framework CoreImage \
+  -framework VideoToolbox \
   -framework AppKit
 
 # Package into .app bundle (required for macOS 15+ screen recording permission dialog)

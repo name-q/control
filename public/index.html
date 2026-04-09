@@ -16,7 +16,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 
 /* Screen stream */
 #screenCanvas{width:100%;height:100%;position:relative;background:#000}
-#streamCanvas{position:absolute;transform-origin:0 0;display:block}
+#streamVideo{position:absolute;transform-origin:0 0;display:block;background:#000}
 #screenOverlay{position:absolute;inset:0;z-index:1}
 #cursor{position:absolute;z-index:2;pointer-events:none;width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.9);box-shadow:0 0 3px rgba(0,0,0,.6);transform:translate(-50%,-50%);display:none}
 #cursorRing{position:absolute;z-index:2;pointer-events:none;width:20px;height:20px;border-radius:50%;border:1.5px solid rgba(255,255,255,.4);transform:translate(-50%,-50%);display:none;transition:left 30ms linear,top 30ms linear}
@@ -77,7 +77,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
   <div id="status" class="disconnected">Connecting...</div>
   <div id="qualityBadge">HD</div>
   <div id="screenCanvas">
-    <canvas id="streamCanvas"></canvas>
+    <video id="streamVideo" autoplay playsinline muted></video>
     <div id="screenOverlay"></div>
     <div id="cursor"></div>
     <div id="cursorRing"></div>
@@ -126,36 +126,36 @@ function mapTouch(t) {
 let ws, screenSize = { width: 1920, height: 1080 };
 const statusEl = document.getElementById('status');
 const screenCanvasEl = document.getElementById('screenCanvas');
-const streamCanvas = document.getElementById('streamCanvas');
-const ctx = streamCanvas.getContext('2d');
+const streamVideo = document.getElementById('streamVideo');
 const screenOverlay = document.getElementById('screenOverlay');
 const cursorEl = document.getElementById('cursor');
 
-// ========== WebSocket ==========
-let streaming = false, streamStarted = false;
-let latestFrameMsg = null; // ArrayBuffer with type header
+// ========== WebRTC + WebSocket ==========
+let pc = null, dataChannel = null;
+let streamStarted = false;
 
 // FPS & latency tracking
 let showStats = false, fpsFrames = 0, fpsLast = Date.now(), fpsCurrent = 0;
 let latency = 0, pingSent = 0;
 let bwBytes = 0, bwLast = Date.now(), bwCurrent = 0;
 
-const QUALITY_PRESETS = [
-  { label: 'SD',   scale: 0.5,  quality: 0.6 },
-  { label: 'HD',   scale: 0.75, quality: 0.75 },
-  { label: 'FHD',  scale: 1,    quality: 0.8 },
-  { label: 'UHD',  scale: 2,    quality: 0.85 },
+// Bitrate presets (kbps)
+const BITRATE_PRESETS = [
+  { label: 'SD',  kbps: 500 },
+  { label: 'HD',  kbps: 1500 },
+  { label: 'FHD', kbps: 3000 },
+  { label: 'UHD', kbps: 5000 },
 ];
-let qualityIdx = 2; // default FHD
+let bitrateIdx = 1; // default HD
 const qualityBadge = document.getElementById('qualityBadge');
-qualityBadge.textContent = QUALITY_PRESETS[qualityIdx].label;
+qualityBadge.textContent = BITRATE_PRESETS[bitrateIdx].label;
 
 qualityBadge.addEventListener('click', (e) => {
   e.stopPropagation();
-  qualityIdx = (qualityIdx + 1) % QUALITY_PRESETS.length;
-  const p = QUALITY_PRESETS[qualityIdx];
+  bitrateIdx = (bitrateIdx + 1) % BITRATE_PRESETS.length;
+  const p = BITRATE_PRESETS[bitrateIdx];
   qualityBadge.textContent = p.label;
-  send('setQuality', { scale: p.scale, quality: p.quality });
+  wsSend('setBitrate', { kbps: p.kbps });
 });
 
 statusEl.addEventListener('click', (e) => {
@@ -200,30 +200,113 @@ function pingLoop() {
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     statusEl.textContent = 'Connected'; statusEl.className = '';
-    send('startStream'); streaming = true;
+    startWebRTC();
     pingLoop();
   };
-  ws.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.className = 'disconnected'; streaming = false; setTimeout(connect, 1500); };
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected'; statusEl.className = 'disconnected';
+    if (pc) { pc.close(); pc = null; }
+    dataChannel = null;
+    setTimeout(connect, 1500);
+  };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
-    if (e.data instanceof ArrayBuffer) {
-      latestFrameMsg = e.data;
-      bwBytes += e.data.byteLength;
-      updateStats();
-      return;
-    }
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'screen') { screenSize = msg.data; serverPlatform = msg.data.platform || 'darwin'; initComboPanel(); }
       if (msg.type === 'pong') latency = Date.now() - pingSent;
       if (msg.type === 'cursor') updateCursor(msg.data);
+      if (msg.type === 'answer') handleAnswer(msg.sdp);
+      if (msg.type === 'ice') handleRemoteIce(msg.candidate);
     } catch {}
   };
 }
 connect();
+
+// Send via DataChannel (fast, UDP) with WebSocket fallback
+function send(type, data = {}) {
+  const msg = JSON.stringify({ type, data });
+  if (dataChannel && dataChannel.readyState === 'open') {
+    dataChannel.send(msg);
+  } else if (ws && ws.readyState === 1) {
+    ws.send(msg);
+  }
+}
+
+// Send via WebSocket only (for signaling)
+function wsSend(type, data = {}) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type, data }));
+}
+
+// ========== WebRTC ==========
+async function startWebRTC() {
+  pc = new RTCPeerConnection({ iceServers: [] }); // LAN, no STUN
+
+  // Create DataChannel for input
+  dataChannel = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+  dataChannel.onopen = () => console.log('DataChannel open');
+  dataChannel.onclose = () => { dataChannel = null; };
+
+  // Receive video track
+  pc.ontrack = (ev) => {
+    streamVideo.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+    streamVideo.play().catch(() => {});
+    if (!streamStarted) { streamStarted = true; fitImage(); }
+    console.log('Video track received');
+  };
+
+  // Trickle ICE
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate) {
+      wsSend('ice', ev.candidate); // note: send candidate directly, not nested
+      // Fix: server expects { type: 'ice', candidate: {...} }
+    }
+  };
+
+  // Fix: send ice as proper format
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'ice', candidate: ev.candidate }));
+    }
+  };
+
+  // Stats for bandwidth tracking
+  setInterval(async () => {
+    if (!pc) return;
+    try {
+      const stats = await pc.getStats();
+      stats.forEach(s => {
+        if (s.type === 'inbound-rtp' && s.kind === 'video') {
+          const bytes = s.bytesReceived || 0;
+          if (bwLast > 0) bwBytes = bytes - (bwBytes || bytes);
+          fpsFrames = s.framesDecoded || 0;
+        }
+      });
+    } catch {}
+  }, 1000);
+
+  // Create offer
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+}
+
+async function handleAnswer(sdp) {
+  if (pc) await pc.setRemoteDescription({ type: 'answer', sdp });
+}
+
+async function handleRemoteIce(candidate) {
+  if (pc) await pc.addIceCandidate(candidate);
+}
+
+// Video auto-fit when metadata loads
+streamVideo.addEventListener('loadedmetadata', () => {
+  if (!streamStarted) { streamStarted = true; }
+  fitImage();
+});
 
 // Cursor rendering — separate from screen tiles, zero-latency CSS
 const cursorRing = document.getElementById('cursorRing');
@@ -295,78 +378,15 @@ function cursorRipple(color) {
   setTimeout(() => ripple.remove(), 350);
 }
 
-// Render loop: decode and composite frames on canvas
-let rendering = false;
-let lastCanvasW = 0, lastCanvasH = 0;
-let renderGeneration = 0; // increments on each new frame, allows abandoning stale renders
-
-async function handleKeyframe(data, gen) {
-  const blob = new Blob([data], { type: 'image/jpeg' });
-  const bitmap = await createImageBitmap(blob);
-  if (gen !== renderGeneration) { if (bitmap.close) bitmap.close(); return; }
-  streamCanvas.width = bitmap.width;
-  streamCanvas.height = bitmap.height;
-  ctx.drawImage(bitmap, 0, 0);
-  if (bitmap.close) bitmap.close();
-  if (!streamStarted || bitmap.width !== lastCanvasW || bitmap.height !== lastCanvasH) {
-    lastCanvasW = bitmap.width; lastCanvasH = bitmap.height;
-    fitImage();
-  }
-  streamStarted = true;
-}
-
-async function handleDelta(buffer, gen) {
-  const view = new DataView(buffer);
-  const regionCount = view.getUint16(0);
-  let offset = 2;
-  const regions = [];
-  for (let i = 0; i < regionCount; i++) {
-    const x = view.getUint16(offset); offset += 2;
-    const y = view.getUint16(offset); offset += 2;
-    const w = view.getUint16(offset); offset += 2;
-    const h = view.getUint16(offset); offset += 2;
-    const jpegLen = view.getUint32(offset); offset += 4;
-    const jpegData = buffer.slice(offset, offset + jpegLen); offset += jpegLen;
-    regions.push({ x, y, blob: new Blob([jpegData], { type: 'image/jpeg' }) });
-  }
-  // Decode in batches of 8 to avoid overwhelming the browser
-  for (let i = 0; i < regions.length; i += 8) {
-    if (gen !== renderGeneration) return; // newer frame arrived, abandon this one
-    const batch = regions.slice(i, i + 8);
-    const bitmaps = await Promise.all(batch.map(d => createImageBitmap(d.blob)));
-    for (let j = 0; j < batch.length; j++) {
-      ctx.drawImage(bitmaps[j], batch[j].x, batch[j].y);
-      if (bitmaps[j].close) bitmaps[j].close();
-    }
-  }
-}
-
-(function renderLoop() {
-  if (!rendering && latestFrameMsg) {
-    rendering = true;
-    const msg = latestFrameMsg;
-    latestFrameMsg = null;
-    renderGeneration++;
-    const gen = renderGeneration;
-    const type = new Uint8Array(msg)[0];
-    const payload = msg.slice(1);
-    const p = type === 1 ? handleKeyframe(payload, gen) : type === 2 ? handleDelta(payload, gen) : Promise.resolve();
-    p.then(() => { rendering = false; }).catch((e) => { console.error('render error', e); rendering = false; });
-  }
-  requestAnimationFrame(renderLoop);
-})();
-
-function send(type, data = {}) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type, data }));
-}
-
 // ========== Screen fit / zoom / pan ==========
 let imgScale = 1, imgX = 0, imgY = 0, baseW = 0, baseH = 0;
 
 function fitImage() {
   const cw = screenCanvasEl.clientWidth, ch = screenCanvasEl.clientHeight;
-  if (!cw || !ch || !screenSize.width) return;
-  const ratio = screenSize.width / screenSize.height;
+  const vw = streamVideo.videoWidth || screenSize.width;
+  const vh = streamVideo.videoHeight || screenSize.height;
+  if (!cw || !ch || !vw) return;
+  const ratio = vw / vh;
   if (cw / ch > ratio) { baseH = ch; baseW = ch * ratio; }
   else { baseW = cw; baseH = cw / ratio; }
   imgScale = 1; imgX = (cw - baseW) / 2; imgY = (ch - baseH) / 2;
@@ -374,9 +394,9 @@ function fitImage() {
 }
 function applyTransform() {
   const w = baseW * imgScale, h = baseH * imgScale;
-  streamCanvas.style.width = w + 'px';
-  streamCanvas.style.height = h + 'px';
-  streamCanvas.style.transform = `translate(${imgX}px,${imgY}px)`;
+  streamVideo.style.width = w + 'px';
+  streamVideo.style.height = h + 'px';
+  streamVideo.style.transform = `translate(${imgX}px,${imgY}px)`;
 }
 function clampPan() {
   const cw = screenCanvasEl.clientWidth, ch = screenCanvasEl.clientHeight;
