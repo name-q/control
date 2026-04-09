@@ -66,15 +66,9 @@ class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
         currentBitrate = bitrate * 1000
-        // Force every frame to be output (don't skip frames when scene is static)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps / 2) as CFNumber) // IDR every 0.5s
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 0.5 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber) // IDR every 1s
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1.0 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
-        // Prevent encoder from dropping to zero bitrate on static scenes
-        // DataRateLimits: [bytes per interval, interval in seconds]
-        let minBytesPerSec = max(bitrate * 1000 / 8, 10000) // at least 10KB/s
-        let limits: [Int] = [minBytesPerSec, 1]
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
 
         VTCompressionSessionPrepareToEncodeFrames(session)
         log("H264 encoder: \(width)x\(height) @ \(Int(fps))fps, \(bitrate)kbps")
@@ -197,20 +191,72 @@ extension CMSampleBuffer {
 class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
     var frameCount = 0
+    var idleFrames = 0       // frames since last change
+    let maxIdleFrames = 5    // send a few frames after change stops, then pause
 
     init(encoder: H264Encoder) {
         self.encoder = encoder
         super.init()
     }
 
+    // Fast whole-frame change detection: sample pixels and count differences
+    var prevSamples: [UInt32] = []
+
+    func hasFrameChanged(_ pb: CVPixelBuffer) -> Bool {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return true }
+        let ptr = base.assumingMemoryBound(to: UInt32.self)
+        let w = CVPixelBufferGetWidth(pb)
+        let h = CVPixelBufferGetHeight(pb)
+        let bpr = CVPixelBufferGetBytesPerRow(pb) / 4
+
+        // Sample ~500 pixels spread across the frame
+        var samples: [UInt32] = []
+        samples.reserveCapacity(500)
+        let stepY = max(h / 22, 1)
+        let stepX = max(w / 22, 1)
+        for y in Swift.stride(from: 0, to: h, by: stepY) {
+            let row = y * bpr
+            for x in Swift.stride(from: 0, to: w, by: stepX) {
+                samples.append(ptr[row + x])
+            }
+        }
+
+        if prevSamples.isEmpty || prevSamples.count != samples.count {
+            prevSamples = samples
+            return true
+        }
+
+        // Count how many sampled pixels changed
+        var changed = 0
+        for i in 0..<samples.count {
+            if samples[i] != prevSamples[i] { changed += 1 }
+        }
+        prevSamples = samples
+
+        // Threshold: if less than 1% of samples changed, consider static
+        return changed > samples.count / 100
+    }
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // Cursor position
+        // Cursor position (always send, even when frame is skipped)
         let cursorLoc = CGEvent(source: nil)?.location ?? .zero
         stdoutHandle.write(Data("CURSOR:\(Int(cursorLoc.x)):\(Int(cursorLoc.y))\n".utf8))
 
-        // Encode frame
+        // Frame change detection
+        if !hasFrameChanged(pb) {
+            idleFrames += 1
+            if idleFrames > maxIdleFrames {
+                return // skip — screen hasn't changed
+            }
+        } else {
+            idleFrames = 0
+        }
+
+        // Encode
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         encoder.encode(pb, timestamp: pts)
         frameCount += 1
