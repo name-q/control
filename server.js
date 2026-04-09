@@ -64,31 +64,68 @@ function getLocalIP() {
 
 // Detect VPN/proxy TUN hijacking and fix LAN routing
 function ensureLanRoute(localIP) {
-  if (os.platform() !== 'darwin') return;
+  if (os.platform() !== 'darwin' && os.platform() !== 'linux') return;
   try {
     const { execSync } = require('child_process');
-    // Check if a nearby but different subnet is routed through TUN
-    // e.g., if we're 10.22.11.x, check if 10.22.12.x goes through utun
-    const prefix = localIP.split('.').slice(0, 2).join('.');
-    const testIP = prefix + '.0.1';
-    const routeCheck = execSync(`route -n get ${testIP} 2>/dev/null`, { encoding: 'utf8' });
-    if (routeCheck.includes('utun') || routeCheck.includes('tun')) {
-      const subnet = prefix + '.0.0/16';
-      const gateway = execSync(`netstat -rn | grep "^default.*en0" | awk '{print $2}'`, { encoding: 'utf8' }).trim();
-      if (gateway) {
-        console.log(`[network] VPN/proxy TUN detected — LAN traffic (${subnet}) routed through VPN`);
-        try {
-          execSync(`sudo -n route add -net ${subnet} ${gateway} 2>/dev/null`);
-          console.log('[network] LAN route added');
-        } catch {
-          try {
-            execSync(`osascript -e 'do shell script "route add -net ${subnet} ${gateway}" with administrator privileges'`);
-            console.log('[network] LAN route added');
-          } catch {
-            console.log(`[network] Please run: sudo route add -net ${subnet} ${gateway}`);
-          }
+
+    // Find the real interface's subnet info
+    const interfaces = os.networkInterfaces();
+    let realNetmask = null, realCidr = null;
+    for (const name of Object.keys(interfaces)) {
+      if (name.startsWith('utun') || name.startsWith('tun') || name.startsWith('tap') || name.startsWith('vir')) continue;
+      for (const iface of interfaces[name]) {
+        if (iface.address === localIP) {
+          realNetmask = iface.netmask;
+          realCidr = iface.cidr;
+          break;
         }
       }
+      if (realNetmask) break;
+    }
+    if (!realNetmask) return;
+
+    // Calculate network address and prefix length from CIDR
+    // e.g., "10.22.11.140/24" → network "10.22.11.0", prefix 24
+    const parts = localIP.split('.').map(Number);
+    const maskParts = realNetmask.split('.').map(Number);
+    const networkParts = parts.map((p, i) => p & maskParts[i]);
+    const network = networkParts.join('.');
+    const prefixLen = maskParts.reduce((acc, m) => acc + (m >>> 0).toString(2).split('1').length - 1, 0);
+
+    // For /24 or smaller subnets, also check the broader network
+    // e.g., if we're on 10.22.11.0/24, phone might be on 10.22.12.0/24
+    // We need to find the right scope to route
+    const testTargets = [];
+    if (prefixLen >= 24) {
+      // Test a neighboring subnet — change the 3rd octet
+      const neighbor = [...networkParts];
+      neighbor[2] = (neighbor[2] + 1) % 256;
+      testTargets.push({ ip: neighbor.join('.'), subnet: networkParts.slice(0, 2).join('.') + '.0.0/16' });
+    }
+    // Always test the exact subnet
+    testTargets.push({ ip: network, subnet: `${network}/${prefixLen}` });
+
+    const gateway = execSync(`netstat -rn | grep "^default.*en0" | awk '{print $2}'`, { encoding: 'utf8' }).trim();
+    if (!gateway) return;
+
+    for (const target of testTargets) {
+      try {
+        const routeCheck = execSync(`route -n get ${target.ip} 2>/dev/null`, { encoding: 'utf8' });
+        if (routeCheck.includes('utun') || routeCheck.includes('tun')) {
+          console.log(`[network] VPN/proxy TUN detected — ${target.subnet} routed through VPN`);
+          try {
+            execSync(`sudo -n route add -net ${target.subnet} ${gateway} 2>/dev/null`);
+            console.log(`[network] Route added: ${target.subnet} via ${gateway}`);
+          } catch {
+            try {
+              execSync(`osascript -e 'do shell script "route add -net ${target.subnet} ${gateway}" with administrator privileges'`);
+              console.log(`[network] Route added: ${target.subnet} via ${gateway}`);
+            } catch {
+              console.log(`[network] Please run: sudo route add -net ${target.subnet} ${gateway}`);
+            }
+          }
+        }
+      } catch {}
     }
   } catch {}
 }
