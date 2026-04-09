@@ -202,7 +202,8 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}`);
   ws.onopen = () => {
     statusEl.textContent = 'Connected'; statusEl.className = '';
-    startWebRTC();
+    // Tell server to create WebRTC peer and send us an offer
+    wsSend('startStream');
     pingLoop();
   };
   ws.onclose = () => {
@@ -218,7 +219,7 @@ function connect() {
       if (msg.type === 'screen') { screenSize = msg.data; serverPlatform = msg.data.platform || 'darwin'; initComboPanel(); }
       if (msg.type === 'pong') latency = Date.now() - pingSent;
       if (msg.type === 'cursor') updateCursor(msg.data);
-      if (msg.type === 'answer') handleAnswer(msg.sdp);
+      if (msg.type === 'offer') handleServerOffer(msg.sdp);
       if (msg.type === 'ice') handleRemoteIce(msg.candidate);
     } catch {}
   };
@@ -241,7 +242,10 @@ function wsSend(type, data = {}) {
 }
 
 // ========== WebRTC ==========
-async function startWebRTC() {
+// ========== WebRTC (browser is answerer) ==========
+async function handleServerOffer(sdp) {
+  if (pc) { pc.close(); pc = null; }
+
   pc = new RTCPeerConnection({ iceServers: [] });
 
   pc.ontrack = (ev) => {
@@ -260,24 +264,21 @@ async function startWebRTC() {
   pc.onconnectionstatechange = () => console.log('PC:', pc.connectionState);
   pc.oniceconnectionstatechange = () => console.log('ICE:', pc.iceConnectionState);
 
-  pc.addTransceiver('video', { direction: 'recvonly' });
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  console.log('Offer sent');
-  ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
-}
-
-async function handleAnswer(sdp) {
-  if (pc) await pc.setRemoteDescription({ type: 'answer', sdp });
+  await pc.setRemoteDescription({ type: 'offer', sdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
+  console.log('Answer sent');
 }
 
 async function handleRemoteIce(candidate) {
-  if (pc) await pc.addIceCandidate(candidate);
+  if (pc) {
+    try { await pc.addIceCandidate(candidate); } catch {}
+  }
 }
 
-// Video auto-fit when metadata loads
 streamVideo.addEventListener('loadedmetadata', () => {
-  if (!streamStarted) { streamStarted = true; }
+  if (!streamStarted) streamStarted = true;
   fitImage();
 });
 

@@ -99,15 +99,16 @@ wss.on('connection', (ws) => {
         console.log('[server] msg:', msg.type);
       }
       switch (msg.type) {
-        // WebRTC signaling
-        case 'offer': {
-          const answer = await stream.handleOffer(ws, msg.sdp, msg.type || 'offer');
-          ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
+        // WebRTC signaling — server is offerer
+        case 'startStream':
+          stream.createPeer(ws);
           break;
-        }
+        case 'answer':
+          stream.handleAnswer(ws, msg.sdp, msg.type);
+          break;
         case 'ice':
-          console.log('[server] ICE from browser:', JSON.stringify(msg.candidate).substring(0, 100));
-          await stream.handleIce(ws, msg.candidate);
+          console.log('[server] ICE from browser');
+          stream.handleIce(ws, msg.candidate);
           break;
 
         // Bitrate control (replaces old setQuality)

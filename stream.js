@@ -95,59 +95,65 @@ function createStream(opts = {}) {
     }
   }
 
-  // WebRTC signaling
-  function handleOffer(ws, sdp, type) {
+  // WebRTC signaling — server is offerer (has video track)
+  function createPeer(ws) {
     const pc = new ndc.PeerConnection('server', { iceServers: [] });
 
-    // Video track with H264
     const video = new ndc.Video('video', 'sendonly');
     video.addH264Codec(96);
-    video.addSSRC(Math.floor(Math.random() * 0xFFFFFFFF), 'screen');
-    const rtpCfg = new ndc.RtpPacketizationConfig(Math.floor(Math.random() * 0xFFFFFFFF), 'screen', 96, 90000);
+    const ssrc = (Math.random() * 0xFFFFFFFF) >>> 0;
+    video.addSSRC(ssrc, 'screen');
+    const rtpCfg = new ndc.RtpPacketizationConfig(ssrc, 'screen', 96, 90000);
     const packetizer = new ndc.H264RtpPacketizer('LongStartSequence', rtpCfg);
     const track = pc.addTrack(video);
     track.setMediaHandler(packetizer);
 
-    // DataChannel for input (browser creates it)
+    // DataChannel for input
     pc.onDataChannel((dc) => {
-      dc.onMessage((msg) => {
-        if (ws._onDataChannelMessage) ws._onDataChannelMessage(msg);
-      });
+      dc.onMessage((msg) => { if (ws._onDataChannelMessage) ws._onDataChannelMessage(msg); });
       if (peers.has(ws)) peers.get(ws).dc = dc;
     });
 
-    // ICE candidates → browser
+    // Send ICE candidates to browser
     pc.onLocalCandidate((candidate, mid) => {
       try { ws.send(JSON.stringify({ type: 'ice', candidate: { candidate, sdpMid: mid } })); } catch {}
     });
 
+    // Send offer to browser
+    pc.onLocalDescription((sdp, type) => {
+      console.log('[stream] Sending', type, 'to browser');
+      try { ws.send(JSON.stringify({ type, sdp })); } catch {}
+    });
+
     pc.onStateChange((state) => console.log('[stream] connection:', state));
 
-    // Set remote description (browser's offer)
-    pc.setRemoteDescription(sdp, type);
+    track.onOpen(() => console.log('[stream] Track open'));
 
     peers.set(ws, { pc, track, dc: null });
+
+    if (!proc) start();
+    requestKeyframe();
+
+    // Server creates offer
+    pc.setLocalDescription();
+    console.log('[stream] Peer created, generating offer');
+  }
+
+  function handleAnswer(ws, sdp, type) {
+    const peer = peers.get(ws);
+    if (!peer) return;
+    peer.pc.setRemoteDescription(sdp, type || 'answer');
+    console.log('[stream] Answer applied');
 
     // Flush buffered ICE
     const buffered = pendingIce.get(ws);
     if (buffered) {
       for (const c of buffered) {
-        try { pc.addRemoteCandidate(c.candidate, c.sdpMid || '0'); } catch {}
+        try { peer.pc.addRemoteCandidate(c.candidate, c.sdpMid || '0'); } catch {}
       }
       console.log('[stream] Flushed', buffered.length, 'ICE candidates');
       pendingIce.delete(ws);
     }
-
-    if (!proc) start();
-    requestKeyframe();
-
-    // onLocalDescription fires after setRemoteDescription
-    return new Promise((resolve) => {
-      pc.onLocalDescription((answerSdp, answerType) => {
-        console.log('[stream] Answer generated');
-        resolve({ sdp: answerSdp, type: answerType });
-      });
-    });
   }
 
   function handleIce(ws, candidate) {
@@ -180,7 +186,7 @@ function createStream(opts = {}) {
   }
   function getScreenSize() { return screenSize; }
 
-  return { ready: readyPromise, handleOffer, handleIce, removePeer, requestKeyframe, setBitrate, start, stop, getScreenSize };
+  return { ready: readyPromise, createPeer, handleAnswer, handleIce, removePeer, requestKeyframe, setBitrate, start, stop, getScreenSize };
 }
 
 module.exports = { createStream };
