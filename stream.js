@@ -116,7 +116,9 @@ function createStream(opts = {}) {
 
     // Send ICE candidates to browser
     pc.onLocalCandidate((candidate, mid) => {
-      try { ws.send(JSON.stringify({ type: 'ice', candidate: { candidate, sdpMid: mid } })); } catch {}
+      // node-datachannel gives "a=candidate:..." format, browser needs "candidate:..."
+      const c = candidate.startsWith('a=') ? candidate.substring(2) : candidate;
+      try { ws.send(JSON.stringify({ type: 'ice', candidate: { candidate: c, sdpMid: mid } })); } catch {}
     });
 
     // Send offer to browser
@@ -149,7 +151,7 @@ function createStream(opts = {}) {
     const buffered = pendingIce.get(ws);
     if (buffered) {
       for (const c of buffered) {
-        try { peer.pc.addRemoteCandidate(c.candidate, c.sdpMid || '0'); } catch {}
+        try { peer.pc.addRemoteCandidate(c.candidate, c.mid); } catch {}
       }
       console.log('[stream] Flushed', buffered.length, 'ICE candidates');
       pendingIce.delete(ws);
@@ -158,11 +160,14 @@ function createStream(opts = {}) {
 
   function handleIce(ws, candidate) {
     const peer = peers.get(ws);
+    // Browser sends { candidate: "candidate:...", sdpMid: "0" }
+    const c = candidate.candidate || candidate;
+    const mid = candidate.sdpMid || '0';
     if (peer) {
-      try { peer.pc.addRemoteCandidate(candidate.candidate, candidate.sdpMid || '0'); } catch {}
+      try { peer.pc.addRemoteCandidate(c, mid); } catch (e) { console.error('[stream] ICE err:', e.message); }
     } else {
       if (!pendingIce.has(ws)) pendingIce.set(ws, []);
-      pendingIce.get(ws).push(candidate);
+      pendingIce.get(ws).push({ candidate: c, mid });
     }
   }
 
