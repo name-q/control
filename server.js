@@ -101,8 +101,8 @@ wss.on('connection', (ws) => {
       switch (msg.type) {
         // WebRTC signaling
         case 'offer': {
-          const answerSdp = await stream.handleOffer(ws, msg.sdp);
-          ws.send(JSON.stringify({ type: 'answer', sdp: answerSdp }));
+          const answer = await stream.handleOffer(ws, msg.sdp, msg.type || 'offer');
+          ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
           break;
         }
         case 'ice':

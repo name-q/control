@@ -10,7 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "werift": "^0.22.9",
+    "node-datachannel": "^0.32.2",
     "ws": "^8.20.0"
   }
 }

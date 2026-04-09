@@ -2,27 +2,20 @@ const { spawn } = require('child_process');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { RTCPeerConnection, MediaStreamTrack, useH264, H264RtpPayload, RtpPacket, RtpHeader } = require('werift');
+const ndc = require('node-datachannel');
 
 const DEFAULTS = { fps: 30, scale: 1, bitrate: 2000 };
-const H264_CLOCK_RATE = 90000;
 
 function getCaptureCommand() {
   const platform = os.platform();
   const base = path.join(__dirname, 'capture');
   if (platform === 'darwin') {
     const bin = path.join(base, 'macos', 'ScreenCapture.app', 'Contents', 'MacOS', 'capture');
-    if (!fs.existsSync(bin)) {
-      console.error('[stream] capture binary not found. Run: cd capture/macos && ./build.sh');
-      return null;
-    }
+    if (!fs.existsSync(bin)) return null;
     return bin;
   } else if (platform === 'win32') {
     const bin = path.join(base, 'windows', 'capture.exe');
-    if (!fs.existsSync(bin)) {
-      console.error('[stream] capture.exe not found. Run: cd capture\\windows && build.bat');
-      return null;
-    }
+    if (!fs.existsSync(bin)) return null;
     return bin;
   }
   return null;
@@ -37,37 +30,20 @@ function createStream(opts = {}) {
   const readyPromise = new Promise(r => { readyResolve = r; });
   let latestCursor = null;
 
-  // WebRTC peers: Map<ws, { pc, track, dataChannel }>
+  // Peers: Map<ws, { pc, track, dc }>
   const peers = new Map();
-  const pendingIce = new Map(); // Buffer ICE candidates that arrive before offer is processed
-
-  let seqNum = 0;
-  let rtpTimestamp = 0;
-  let firstTs = 0;
-  const ssrc = (Math.random() * 0xFFFFFFFF) >>> 0;
+  const pendingIce = new Map();
 
   function start() {
     if (proc) return;
     const bin = getCaptureCommand();
-    if (!bin) return;
-
+    if (!bin) { console.error('[stream] capture binary not found'); return; }
     proc = spawn(bin, [String(cfg.fps), String(cfg.scale), String(cfg.bitrate)], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-
-    proc.stdout.on('data', (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      parseOutput();
-    });
-    proc.stderr.on('data', (d) => {
-      const msg = d.toString().trim();
-      if (msg) console.log('[stream]', msg);
-    });
-    proc.on('close', (code) => {
-      console.log('[stream] capture exited with code', code);
-      proc = null;
-    });
-
+    proc.stdout.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); parseOutput(); });
+    proc.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) console.log('[stream]', m); });
+    proc.on('close', (code) => { console.log('[stream] capture exited', code); proc = null; });
     console.log(`[stream] capture started, fps=${cfg.fps} bitrate=${cfg.bitrate}kbps`);
   }
 
@@ -81,253 +57,130 @@ function createStream(opts = {}) {
         const parts = line.split(':');
         latestCursor = { x: Number(parts[1]), y: Number(parts[2]) };
         buf = buf.subarray(nl + 1);
-        // Broadcast cursor to all peers via their WebSocket
         for (const [ws] of peers) {
           try { ws.send(JSON.stringify({ type: 'cursor', data: latestCursor })); } catch {}
         }
         continue;
       }
-
       if (line.startsWith('READY:')) {
         const parts = line.split(':');
         screenSize = { width: Number(parts[1]), height: Number(parts[2]) };
         buf = buf.subarray(nl + 1);
-        console.log('[stream] screen size:', screenSize);
+        console.log('[stream] screen:', screenSize);
         if (readyResolve) { readyResolve(); readyResolve = null; }
         continue;
       }
-
       if (line.startsWith('NALU:')) {
-        // NALU:<len>:<ts>:<isKey>
         const parts = line.substring(5).split(':');
         const len = parseInt(parts[0], 10);
-        const ts = parseInt(parts[1], 10);
-        const isKey = parts[2] === '1';
         const dataStart = nl + 1;
         if (buf.length < dataStart + len) break;
-
-        const naluData = Buffer.from(buf.subarray(dataStart, dataStart + len));
+        const naluData = buf.subarray(dataStart, dataStart + len);
         buf = buf.subarray(dataStart + len);
-
-        // Feed H264 NALUs to all WebRTC peers
-        feedNALU(naluData, ts, isKey);
+        broadcastNALU(naluData);
         continue;
       }
-
       buf = buf.subarray(nl + 1);
     }
     if (buf.length > 5 * 1024 * 1024) buf = Buffer.alloc(0);
   }
 
-  const MTU = 1200; // Max RTP payload size before fragmentation
-
-  function feedNALU(annexBData, timestamp, isKey) {
-    const nalus = parseAnnexB(annexBData);
-    if (!firstTs) firstTs = timestamp;
-    rtpTimestamp = ((timestamp - firstTs) * 90) >>> 0; // relative ms → 90kHz, unsigned 32-bit
-
-    for (let i = 0; i < nalus.length; i++) {
-      const nalu = nalus[i];
-      if (nalu.length === 0) continue;
-      const isLast = (i === nalus.length - 1);
-
-      if (nalu.length <= MTU) {
-        // Single NALU packet — fits in one RTP packet
-        sendRtpPacket(nalu, isLast);
-      } else {
-        // FU-A fragmentation (RFC 6184)
-        const naluType = nalu[0] & 0x1f;
-        const nri = nalu[0] & 0x60;
-        let offset = 1; // skip NALU header byte
-
-        while (offset < nalu.length) {
-          const end = Math.min(offset + MTU - 2, nalu.length); // -2 for FU indicator + FU header
-          const isStart = (offset === 1);
-          const isEnd = (end === nalu.length);
-
-          const fuIndicator = (nri | 28); // FU-A type = 28
-          const fuHeader = (isStart ? 0x80 : 0) | (isEnd ? 0x40 : 0) | naluType;
-
-          const fragment = Buffer.allocUnsafe(2 + (end - offset));
-          fragment[0] = fuIndicator;
-          fragment[1] = fuHeader;
-          nalu.copy(fragment, 2, offset, end);
-
-          sendRtpPacket(fragment, isLast && isEnd);
-          offset = end;
-        }
-      }
-    }
-  }
-
-  function sendRtpPacket(payload, marker) {
-    seqNum = (seqNum + 1) & 0xFFFF;
-    const header = new RtpHeader();
-    header.payloadType = 96;
-    header.sequenceNumber = seqNum;
-    header.timestamp = rtpTimestamp;
-    header.ssrc = ssrc;
-    header.marker = marker;
-
-    const pkt = new RtpPacket(header, payload);
-    const serialized = pkt.serialize();
-
+  function broadcastNALU(data) {
     for (const [, peer] of peers) {
       try {
-        peer.track.writeRtp(serialized);
-      } catch (e) {
-        if (seqNum <= 3) console.error('[stream] writeRtp error:', e.message);
-      }
-    }
-  }
-
-  function parseAnnexB(data) {
-    const nalus = [];
-    let i = 0;
-    while (i < data.length) {
-      // Find start code (00 00 00 01 or 00 00 01)
-      let scLen = 0;
-      if (i + 3 < data.length && data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
-        scLen = 4;
-      } else if (i + 2 < data.length && data[i] === 0 && data[i+1] === 0 && data[i+2] === 1) {
-        scLen = 3;
-      } else {
-        i++;
-        continue;
-      }
-      i += scLen;
-
-      // Find next start code
-      let end = data.length;
-      for (let j = i; j < data.length - 3; j++) {
-        if (data[j] === 0 && data[j+1] === 0 && ((data[j+2] === 0 && data[j+3] === 1) || data[j+2] === 1)) {
-          end = j;
-          break;
+        if (peer.track && peer.track.isOpen()) {
+          peer.track.sendMessageBinary(data);
         }
-      }
-
-      nalus.push(data.subarray(i, end));
-      i = end;
+      } catch {}
     }
-    return nalus;
   }
 
   // WebRTC signaling
-  async function handleOffer(ws, sdp) {
-    const pc = new RTCPeerConnection({
-      iceServers: [],
-      codecs: { video: [useH264()] },
-      iceUseIpv4: true,
-      iceUseIpv6: false,
+  function handleOffer(ws, sdp, type) {
+    const pc = new ndc.PeerConnection('server', { iceServers: [] });
+
+    // Video track with H264
+    const video = new ndc.Video('video', 'sendonly');
+    video.addH264Codec(96);
+    video.addSSRC(Math.floor(Math.random() * 0xFFFFFFFF), 'screen');
+    const rtpCfg = new ndc.RtpPacketizationConfig(Math.floor(Math.random() * 0xFFFFFFFF), 'screen', 96, 90000);
+    const packetizer = new ndc.H264RtpPacketizer('LongStartSequence', rtpCfg);
+    const track = pc.addTrack(video);
+    track.setMediaHandler(packetizer);
+
+    // DataChannel for input (browser creates it)
+    pc.onDataChannel((dc) => {
+      dc.onMessage((msg) => {
+        if (ws._onDataChannelMessage) ws._onDataChannelMessage(msg);
+      });
+      if (peers.has(ws)) peers.get(ws).dc = dc;
     });
 
-    const track = new MediaStreamTrack({ kind: 'video' });
-    pc.addTrack(track);
+    // ICE candidates → browser
+    pc.onLocalCandidate((candidate, mid) => {
+      try { ws.send(JSON.stringify({ type: 'ice', candidate: { candidate, sdpMid: mid } })); } catch {}
+    });
 
-    // DataChannel for input (created by browser)
-    pc.ondatachannel = (ev) => {
-      const dc = ev.channel;
-      dc.onmessage = (e) => {
-        if (ws._onDataChannelMessage) ws._onDataChannelMessage(e.data);
-      };
-      if (peers.has(ws)) peers.get(ws).dataChannel = dc;
-    };
+    pc.onStateChange((state) => console.log('[stream] connection:', state));
 
-    // Trickle ICE: send candidates as they arrive
-    pc.onicecandidate = (ev) => {
-      if (ev.candidate) {
-        try { ws.send(JSON.stringify({ type: 'ice', candidate: ev.candidate })); } catch {}
-      }
-    };
+    // Set remote description (browser's offer)
+    pc.setRemoteDescription(sdp, type);
 
-    await pc.setRemoteDescription({ type: 'offer', sdp });
-    console.log('[stream] Browser offer SDP:\n', sdp.substring(0, 500));
-    const answer = await pc.createAnswer();
-    console.log('[stream] Server answer SDP:\n', answer.sdp.substring(0, 500));
+    peers.set(ws, { pc, track, dc: null });
 
-    peers.set(ws, { pc, track, dataChannel: null });
-
-    // Flush any ICE candidates that arrived before the offer was processed
+    // Flush buffered ICE
     const buffered = pendingIce.get(ws);
     if (buffered) {
       for (const c of buffered) {
-        try { await pc.addIceCandidate(c); } catch {}
+        try { pc.addRemoteCandidate(c.candidate, c.sdpMid || '0'); } catch {}
       }
-      console.log('[stream] Flushed', buffered.length, 'buffered ICE candidates');
+      console.log('[stream] Flushed', buffered.length, 'ICE candidates');
       pendingIce.delete(ws);
     }
-
-    // Non-blocking: setLocalDescription triggers ICE gathering
-    pc.setLocalDescription(answer).then(() => {
-      console.log('[stream] setLocalDescription completed');
-    }).catch(() => {});
-
-    // Log connection state changes
-    pc.onconnectionstatechange = () => console.log('[stream] connection:', pc.connectionState);
-    pc.oniceconnectionstatechange = () => console.log('[stream] ICE:', pc.iceConnectionState);
 
     if (!proc) start();
     requestKeyframe();
 
-    console.log('[stream] WebRTC peer connected, answer sent');
-    return answer.sdp;
+    // onLocalDescription fires after setRemoteDescription
+    return new Promise((resolve) => {
+      pc.onLocalDescription((answerSdp, answerType) => {
+        console.log('[stream] Answer generated');
+        resolve({ sdp: answerSdp, type: answerType });
+      });
+    });
   }
 
-  async function handleIce(ws, candidate) {
+  function handleIce(ws, candidate) {
     const peer = peers.get(ws);
     if (peer) {
-      console.log('[stream] Adding ICE candidate');
-      try {
-        await peer.pc.addIceCandidate(candidate);
-      } catch (e) {
-        console.error('[stream] ICE error:', e.message);
-      }
+      try { peer.pc.addRemoteCandidate(candidate.candidate, candidate.sdpMid || '0'); } catch {}
     } else {
-      // Buffer — offer not processed yet
       if (!pendingIce.has(ws)) pendingIce.set(ws, []);
       pendingIce.get(ws).push(candidate);
-      console.log('[stream] Buffered ICE candidate (offer pending)');
     }
   }
 
   function removePeer(ws) {
     const peer = peers.get(ws);
-    if (peer) {
-      peer.pc.close();
-      peers.delete(ws);
-      if (peers.size === 0 && proc) {
-        console.log('[stream] no peers, stopping capture');
-        stop();
-      }
-    }
+    if (peer) { peer.pc.close(); peers.delete(ws); }
+    pendingIce.delete(ws);
+    if (peers.size === 0 && proc) { console.log('[stream] no peers, stopping'); stop(); }
   }
 
-  function requestKeyframe() {
-    if (proc && proc.stdin.writable) proc.stdin.write('KEYFRAME\n');
-  }
-
+  function requestKeyframe() { if (proc && proc.stdin.writable) proc.stdin.write('KEYFRAME\n'); }
   function setBitrate(kbps) {
     cfg.bitrate = kbps;
     if (proc && proc.stdin.writable) proc.stdin.write(`BITRATE:${kbps}\n`);
-    console.log(`[stream] bitrate changed: ${kbps}kbps`);
+    console.log(`[stream] bitrate: ${kbps}kbps`);
   }
-
   function stop() {
     if (proc) { proc.kill(); proc = null; }
-    for (const [, peer] of peers) peer.pc.close();
-    peers.clear();
-    buf = Buffer.alloc(0);
+    for (const [, p] of peers) p.pc.close();
+    peers.clear(); pendingIce.clear(); buf = Buffer.alloc(0);
   }
-
   function getScreenSize() { return screenSize; }
-  function getPeerCount() { return peers.size; }
 
-  return {
-    ready: readyPromise,
-    handleOffer, handleIce, removePeer,
-    requestKeyframe, setBitrate,
-    start, stop, getScreenSize, getPeerCount,
-  };
+  return { ready: readyPromise, handleOffer, handleIce, removePeer, requestKeyframe, setBitrate, start, stop, getScreenSize };
 }
 
 module.exports = { createStream };
