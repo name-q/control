@@ -69,6 +69,7 @@ typedef void (*rtcClosedCallbackFunc)(int id, void *ptr);
 typedef void (*rtcMessageCallbackFunc)(int id, const char *message, int size, void *ptr);
 typedef void (*rtcDataChannelCallbackFunc)(int pc, int dc, void *ptr);
 typedef void (*rtcPliHandlerCallbackFunc)(int tr, void *ptr);
+typedef void (*rtcRembHandlerCallbackFunc)(int tr, unsigned int bitrate, void *ptr);
 
 // PeerConnection
 int rtcCreatePeerConnection(const rtcConfiguration *config);
@@ -95,6 +96,11 @@ int rtcSetClosedCallback(int id, rtcClosedCallbackFunc cb);
 int rtcSendMessage(int id, const char *data, int size);
 int rtcSetH264Packetizer(int tr, const rtcPacketizerInit *init);
 int rtcChainPliHandler(int tr, rtcPliHandlerCallbackFunc cb);
+int rtcChainRembHandler(int tr, rtcRembHandlerCallbackFunc cb);
+int rtcChainRtcpNackResponder(int tr, unsigned int maxStoredPacketsCount);
+int rtcChainRtcpSrReporter(int tr);
+int rtcChainPacingHandler(int tr, double bitsPerSecond, int sendIntervalMs);
+int rtcSetTrackRtpTimestamp(int id, uint32_t timestamp);
 
 // DataChannel
 int rtcSetDataChannelCallback(int pc, rtcDataChannelCallbackFunc cb);

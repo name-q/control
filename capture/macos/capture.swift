@@ -18,6 +18,8 @@ let bindAddr = CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : nil
 
 let stdoutH = FileHandle.standardOutput
 let stderrH = FileHandle.standardError
+var pliReceived = false    // PLI flag — encoder checks this each frame
+var rembBitrate: UInt32 = 0 // REMB — browser-reported available bandwidth
 func log(_ msg: String) { stderrH.write(Data((msg + "\n").utf8)) }
 func output(_ msg: String) { stdoutH.write(Data((msg + "\n").utf8)) }
 
@@ -105,17 +107,35 @@ class WebRTCManager {
         "screen".withCString { pktInit.cname = $0 }
         pktInit.payloadType = 96
         pktInit.clockRate = 90000
-        pktInit.maxFragmentSize = 1200 // MTU-safe
-        pktInit.nalSeparator = 2 // RTC_NAL_SEPARATOR_LONG_START_SEQUENCE
+        pktInit.maxFragmentSize = 1200
+        pktInit.nalSeparator = 2
         rtcSetH264Packetizer(trackId, &pktInit)
+
+        // Media handler chain (order matters):
+        // 1. RTCP SR Reporter — sends sender reports for sync
+        rtcChainRtcpSrReporter(trackId)
+
+        // 2. NACK Responder — auto-retransmit lost packets (cache 512 packets ≈ 17 frames)
+        rtcChainRtcpNackResponder(trackId, 512)
+
+        // 3. Pacing — smooth out burst sends, prevent UDP congestion
+        rtcChainPacingHandler(trackId, Double(defaultBitrate * 1000), 10) // 10ms intervals
+
+        // 4. PLI Handler — browser requests keyframe on packet loss
+        rtcChainPliHandler(trackId) { tr, ptr in
+            log("[webrtc] PLI → forcing IDR")
+            // Set flag — encoder will pick it up on next frame
+            pliReceived = true
+        }
+
+        // 5. REMB Handler — browser reports available bandwidth
+        rtcChainRembHandler(trackId) { tr, bitrate, ptr in
+            log("[webrtc] REMB: \(bitrate / 1000)kbps")
+            rembBitrate = bitrate
+        }
 
         rtcSetOpenCallback(trackId) { id, ptr in
             log("[webrtc] Track open")
-        }
-
-        // PLI handler — browser requests keyframe
-        rtcChainPliHandler(trackId) { tr, ptr in
-            log("[webrtc] PLI received")
         }
 
         log("[webrtc] H264 track added, id=\(trackId)")
@@ -191,17 +211,33 @@ class H264Encoder {
 
     func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
         guard let s = session else { return }
+
+        // Check PLI flag — browser lost packets, needs IDR immediately
+        if pliReceived {
+            pliReceived = false
+            forceKeyframe = true
+        }
+
+        // Check REMB — browser reports available bandwidth, adapt bitrate
+        if rembBitrate > 0 {
+            let newBps = Int(rembBitrate)
+            if newBps != lastRembApplied {
+                lastRembApplied = newBps
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: newBps as CFNumber)
+            }
+        }
+
         var flags: VTEncodeInfoFlags = []
-        var props: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+        let props: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         if forceKeyframe { forceKeyframe = false }
 
         VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
             duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
             guard status == noErr, let sb = sb, let self = self, let webrtc = self.webrtc else { return }
-            // Dispatch to send queue — don't block the encode callback
             self.sendQueue.async { self.sendToWebRTC(sb, webrtc: webrtc) }
         }
     }
+    var lastRembApplied: Int = 0
 
     private func sendToWebRTC(_ sb: CMSampleBuffer, webrtc: WebRTCManager) {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sb) else { return }
