@@ -162,6 +162,7 @@ class H264Encoder {
     var session: VTCompressionSession?
     var forceKeyframe = false
     var webrtc: WebRTCManager?
+    let sendQueue = DispatchQueue(label: "rtc.send", qos: .userInteractive)
 
     init(width: Int, height: Int, fps: Double, bitrate: Int) {
         var s: VTCompressionSession?
@@ -197,7 +198,8 @@ class H264Encoder {
         VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
             duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
             guard status == noErr, let sb = sb, let self = self, let webrtc = self.webrtc else { return }
-            self.sendToWebRTC(sb, webrtc: webrtc)
+            // Dispatch to send queue — don't block the encode callback
+            self.sendQueue.async { self.sendToWebRTC(sb, webrtc: webrtc) }
         }
     }
 
@@ -244,7 +246,7 @@ extension CMSampleBuffer {
 }
 // ========== Stream Output ==========
 class StreamOutput: NSObject, SCStreamOutput {
-    let encoder: H264Encoder
+    var encoder: H264Encoder
 
     init(encoder: H264Encoder) { self.encoder = encoder; super.init() }
 
@@ -273,7 +275,7 @@ func startCapture() async throws {
     webrtc.addH264Track(ssrc: ssrc)
 
     // Encoder
-    let encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
+    var encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
     encoder.webrtc = webrtc
 
     // Screen capture
@@ -307,14 +309,14 @@ func startCapture() async throws {
             if byte[0] == 0x0a {
                 let line = stdinBuf.trimmingCharacters(in: .whitespacesAndNewlines)
                 stdinBuf = ""
-                handleStdinCommand(line, webrtc: webrtc, encoder: encoder, stream: s, display: display)
+                handleStdinCommand(line, webrtc: webrtc, encoder: &encoder, streamOutput: o, stream: s, display: display)
             }
             pfd.revents = 0
         }
     }
 }
 
-func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: H264Encoder, stream: SCStream, display: SCDisplay) {
+func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H264Encoder, streamOutput: StreamOutput, stream: SCStream, display: SCDisplay) {
     guard let data = json.data(using: .utf8),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let type = obj["type"] as? String else { return }
@@ -333,22 +335,24 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: H264Enco
         }
     case "keyframe":
         encoder.forceKeyframe = true
-    case "bitrate":
-        if let kbps = obj["kbps"] as? Int {
-            encoder.setBitrate(kbps * 1000)
-            log("[stdin] Bitrate: \(kbps)kbps")
-        }
-    case "scale":
-        if let newScale = obj["scale"] as? Double {
-            let nw = Int(Double(display.width) * newScale)
-            let nh = Int(Double(display.height) * newScale)
-            let newCfg = SCStreamConfiguration()
-            newCfg.width = nw; newCfg.height = nh
-            newCfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-            newCfg.queueDepth = 3; newCfg.pixelFormat = kCVPixelFormatType_32BGRA; newCfg.showsCursor = false
-            Task { try? await stream.updateConfiguration(newCfg) }
-            log("[stdin] Scale: \(nw)x\(nh)")
-        }
+    case "quality":
+        let kbps = obj["kbps"] as? Int ?? defaultBitrate
+        let newScale = obj["scale"] as? Double ?? scale
+        let nw = Int(Double(display.width) * newScale)
+        let nh = Int(Double(display.height) * newScale)
+        // Update SCStream resolution
+        let newCfg = SCStreamConfiguration()
+        newCfg.width = nw; newCfg.height = nh
+        newCfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        newCfg.queueDepth = 3; newCfg.pixelFormat = kCVPixelFormatType_32BGRA; newCfg.showsCursor = false
+        Task { try? await stream.updateConfiguration(newCfg) }
+        // Rebuild encoder with new dimensions + bitrate
+        let newEncoder = H264Encoder(width: nw, height: nh, fps: fps, bitrate: kbps)
+        newEncoder.webrtc = encoder.webrtc
+        encoder = newEncoder
+        // Update StreamOutput reference
+        streamOutput.encoder = newEncoder
+        log("[stdin] Quality: \(nw)x\(nh) \(kbps)kbps")
     default: break
     }
 }

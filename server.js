@@ -181,10 +181,9 @@ wss.on('connection', (ws) => {
           stream.forwardToCapture(ws, msg);
           break;
 
-        // Quality control
+        // Quality control — single command with both bitrate and scale
         case 'setQuality':
-          stream.setBitrate(ws, msg.data.kbps);
-          stream.setScale(ws, msg.data.scale);
+          stream.forwardToCapture(ws, { type: 'quality', kbps: msg.data.kbps, scale: msg.data.scale });
           break;
 
         case 'ping':

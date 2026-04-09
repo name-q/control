@@ -89,14 +89,6 @@ function createStream(opts = {}) {
     if (p) { p.kill(); clients.delete(ws); }
   }
 
-  function setBitrate(ws, kbps) {
-    forwardToCapture(ws, { type: 'bitrate', kbps });
-  }
-
-  function setScale(ws, scale) {
-    forwardToCapture(ws, { type: 'scale', scale });
-  }
-
   function stop() {
     for (const [, p] of clients) p.kill();
     clients.clear();
