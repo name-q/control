@@ -41,10 +41,10 @@ function createStream(opts = {}) {
   const peers = new Map();
   const pendingIce = new Map(); // Buffer ICE candidates that arrive before offer is processed
 
-  // H264 RTP state
   let seqNum = 0;
   let rtpTimestamp = 0;
-  const ssrc = Math.floor(Math.random() * 0xFFFFFFFF);
+  let firstTs = 0;
+  const ssrc = (Math.random() * 0xFFFFFFFF) >>> 0;
 
   function start() {
     if (proc) return;
@@ -123,7 +123,8 @@ function createStream(opts = {}) {
 
   function feedNALU(annexBData, timestamp, isKey) {
     const nalus = parseAnnexB(annexBData);
-    rtpTimestamp = Math.floor(timestamp * 90) & 0xFFFFFFFF;
+    if (!firstTs) firstTs = timestamp;
+    rtpTimestamp = ((timestamp - firstTs) * 90) >>> 0; // relative ms → 90kHz, unsigned 32-bit
 
     for (let i = 0; i < nalus.length; i++) {
       const nalu = nalus[i];
