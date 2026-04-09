@@ -216,6 +216,13 @@ class H264Encoder {
         if pliReceived {
             pliReceived = false
             forceKeyframe = true
+            // After PLI, shorten GOP temporarily for faster recovery
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps / 2) as CFNumber)
+            // Schedule GOP restore after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let s = self?.session else { return }
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
+            }
         }
 
         // Check REMB — browser reports available bandwidth, adapt bitrate
@@ -280,22 +287,37 @@ extension CMSampleBuffer {
         return !(f[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
     }
 }
-// ========== Stream Output ==========
+// ========== Stream Output + Frame Scheduler ==========
 class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
+    var frameCount: UInt64 = 0
+    var lastEncodeTime: UInt64 = 0
+    let targetInterval: UInt64 // nanoseconds between frames
 
-    init(encoder: H264Encoder) { self.encoder = encoder; super.init() }
+    init(encoder: H264Encoder, fps: Double) {
+        self.encoder = encoder
+        self.targetInterval = UInt64(1_000_000_000 / fps)
+        super.init()
+    }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
 
-        // Cursor (always send via stdout → Node → WebSocket)
+        // Cursor (always send)
         let loc = CGEvent(source: nil)?.location ?? .zero
         output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
 
-        // Encode every frame — H264 P-frames on static content are tiny (~200 bytes)
-        // No need for dirty rect filtering in V3 (video goes direct UDP, not through Node)
+        // Frame Scheduler: if REMB says bandwidth is low, skip frames to reduce load
+        let now = mach_absolute_time()
+        if rembBitrate > 0 && rembBitrate < 500_000 {
+            // Very low bandwidth — drop to 15fps
+            let minInterval = targetInterval * 2
+            if now - lastEncodeTime < minInterval { return }
+        }
+
+        lastEncodeTime = now
         encoder.encode(pb, timestamp: CMSampleBufferGetPresentationTimeStamp(sb))
+        frameCount += 1
     }
 }
 // ========== Start Capture ==========
@@ -320,7 +342,7 @@ func startCapture() async throws {
     cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
     cfg.queueDepth = 3; cfg.pixelFormat = kCVPixelFormatType_32BGRA; cfg.showsCursor = false
     let s = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: cfg, delegate: nil)
-    let o = StreamOutput(encoder: encoder)
+    let o = StreamOutput(encoder: encoder, fps: fps)
     try s.addStreamOutput(o, type: .screen, sampleHandlerQueue: DispatchQueue(label: "cap"))
     try await s.startCapture()
 

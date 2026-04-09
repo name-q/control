@@ -168,6 +168,11 @@ wss.on('connection', (ws) => {
   console.log('Client connected');
   ws.send(JSON.stringify({ type: 'screen', data: { ...mouse.getScreenSize(), platform: os.platform() } }));
 
+  // DataChannel input handler (capture → stdout → stream.js → here)
+  ws._onDcMessage = (data) => {
+    try { handleInput(typeof data === 'string' ? JSON.parse(data) : data); } catch {}
+  };
+
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);

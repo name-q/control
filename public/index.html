@@ -255,6 +255,11 @@ async function handleServerOffer(sdp) {
 
   pc = new RTCPeerConnection({ iceServers: [] });
 
+  // Create DataChannel for input (UDP, unreliable, unordered — lowest latency)
+  dataChannel = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+  dataChannel.onopen = () => console.log('DataChannel open');
+  dataChannel.onclose = () => { dataChannel = null; };
+
   pc.ontrack = (ev) => {
     console.log('ontrack:', ev.track.kind);
     streamVideo.srcObject = ev.streams[0] || new MediaStream([ev.track]);

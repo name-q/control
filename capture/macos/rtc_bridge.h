@@ -104,6 +104,7 @@ int rtcSetTrackRtpTimestamp(int id, uint32_t timestamp);
 
 // DataChannel
 int rtcSetDataChannelCallback(int pc, rtcDataChannelCallbackFunc cb);
+int rtcCreateDataChannel(int pc, const char *label);
 int rtcSetMessageCallback(int id, rtcMessageCallbackFunc cb);
 
 // Logging

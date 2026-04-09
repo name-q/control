@@ -58,7 +58,16 @@ function createStream(opts = {}) {
           continue;
         }
         // JSON signaling (offer, ice) — forward to browser
-        try { ws.send(line); } catch {}
+        // dc messages — handle as input commands
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type === 'dc' && parsed.data) {
+            // DataChannel input from browser → capture → stdout → here
+            if (ws._onDcMessage) ws._onDcMessage(parsed.data);
+          } else {
+            ws.send(line);
+          }
+        } catch { ws.send(line); }
       }
     });
 
