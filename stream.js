@@ -118,21 +118,63 @@ function createStream(opts = {}) {
     if (buf.length > 5 * 1024 * 1024) buf = Buffer.alloc(0);
   }
 
-  function feedNALU(annexBData, timestamp, isKey) {
-    // Parse Annex-B NALUs (split by 00 00 00 01 start codes)
-    const nalus = parseAnnexB(annexBData);
+  const MTU = 1200; // Max RTP payload size before fragmentation
 
-    // Convert timestamp to RTP clock (90kHz)
+  function feedNALU(annexBData, timestamp, isKey) {
+    const nalus = parseAnnexB(annexBData);
     rtpTimestamp = Math.floor(timestamp * 90) & 0xFFFFFFFF;
 
-    for (const nalu of nalus) {
+    for (let i = 0; i < nalus.length; i++) {
+      const nalu = nalus[i];
       if (nalu.length === 0) continue;
+      const isLast = (i === nalus.length - 1);
 
-      // Write RTP-packetized NALU to each peer's track
-      for (const [, peer] of peers) {
-        try {
-          peer.track.writeRtp(nalu, { isKeyframe: isKey });
-        } catch {}
+      if (nalu.length <= MTU) {
+        // Single NALU packet — fits in one RTP packet
+        sendRtpPacket(nalu, isLast);
+      } else {
+        // FU-A fragmentation (RFC 6184)
+        const naluType = nalu[0] & 0x1f;
+        const nri = nalu[0] & 0x60;
+        let offset = 1; // skip NALU header byte
+
+        while (offset < nalu.length) {
+          const end = Math.min(offset + MTU - 2, nalu.length); // -2 for FU indicator + FU header
+          const isStart = (offset === 1);
+          const isEnd = (end === nalu.length);
+
+          const fuIndicator = (nri | 28); // FU-A type = 28
+          const fuHeader = (isStart ? 0x80 : 0) | (isEnd ? 0x40 : 0) | naluType;
+
+          const fragment = Buffer.allocUnsafe(2 + (end - offset));
+          fragment[0] = fuIndicator;
+          fragment[1] = fuHeader;
+          nalu.copy(fragment, 2, offset, end);
+
+          sendRtpPacket(fragment, isLast && isEnd);
+          offset = end;
+        }
+      }
+    }
+  }
+
+  function sendRtpPacket(payload, marker) {
+    seqNum = (seqNum + 1) & 0xFFFF;
+    const header = new RtpHeader();
+    header.payloadType = 96;
+    header.sequenceNumber = seqNum;
+    header.timestamp = rtpTimestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+
+    const pkt = new RtpPacket(header, payload);
+    const serialized = pkt.serialize();
+
+    for (const [, peer] of peers) {
+      try {
+        peer.track.writeRtp(serialized);
+      } catch (e) {
+        if (seqNum <= 3) console.error('[stream] writeRtp error:', e.message);
       }
     }
   }
@@ -202,13 +244,18 @@ function createStream(opts = {}) {
     peers.set(ws, { pc, track, dataChannel: null });
 
     // Non-blocking: setLocalDescription triggers ICE gathering
-    // Don't await — it blocks until gathering completes
-    pc.setLocalDescription(answer).catch(() => {});
+    pc.setLocalDescription(answer).then(() => {
+      console.log('[stream] setLocalDescription completed');
+    }).catch(() => {});
+
+    // Log connection state changes
+    pc.onconnectionstatechange = () => console.log('[stream] connection:', pc.connectionState);
+    pc.oniceconnectionstatechange = () => console.log('[stream] ICE:', pc.iceConnectionState);
 
     if (!proc) start();
     requestKeyframe();
 
-    console.log('[stream] WebRTC peer connected');
+    console.log('[stream] WebRTC peer connected, answer sent');
     return answer.sdp;
   }
 
