@@ -248,17 +248,6 @@ class StreamOutput: NSObject, SCStreamOutput {
 
     init(encoder: H264Encoder) { self.encoder = encoder; super.init() }
 
-    func isDirty(_ sb: CMSampleBuffer) -> Bool {
-        guard let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [NSDictionary],
-              let first = arr.first else { return true }
-        if let status = first["SCStreamUpdateFrameStatus"] as? NSNumber, status.intValue != 0 { return false }
-        guard let rects = first["SCStreamUpdateFrameDirtyRect"] as? [NSDictionary] else { return true }
-        for r in rects {
-            if ((r["Width"] as? NSNumber)?.doubleValue ?? 0) > 0 && ((r["Height"] as? NSNumber)?.doubleValue ?? 0) > 0 { return true }
-        }
-        return false
-    }
-
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
 
@@ -266,7 +255,8 @@ class StreamOutput: NSObject, SCStreamOutput {
         let loc = CGEvent(source: nil)?.location ?? .zero
         output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
 
-        if !isDirty(sb) { return }
+        // Encode every frame — H264 P-frames on static content are tiny (~200 bytes)
+        // No need for dirty rect filtering in V3 (video goes direct UDP, not through Node)
         encoder.encode(pb, timestamp: CMSampleBufferGetPresentationTimeStamp(sb))
     }
 }
