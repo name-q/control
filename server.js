@@ -69,34 +69,66 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
+function handleInput(msg) {
+  switch (msg.type) {
+    case 'move':      mouse.moveBy(msg.data.dx, msg.data.dy); break;
+    case 'moveTo':    mouse.moveTo(msg.data.x, msg.data.y); break;
+    case 'click':     mouse.click(); break;
+    case 'rightClick': mouse.rightClick(); break;
+    case 'mouseDown': mouse.mouseDown(); break;
+    case 'mouseUp':   mouse.mouseUp(); break;
+    case 'scroll':    mouse.scroll(msg.data.dx || 0, msg.data.dy || 0); break;
+    case 'typeText':  mouse.typeText(msg.data.text || ''); break;
+    case 'combo':     mouse.comboKey(msg.data.keyCode, msg.data.modifiers || []); break;
+  }
+}
+
 wss.on('connection', (ws) => {
   console.log('Client connected');
   ws.send(JSON.stringify({ type: 'screen', data: { ...mouse.getScreenSize(), platform: os.platform() } }));
 
-  ws.on('message', (raw) => {
+  // DataChannel input handler (set by stream.js when DC is established)
+  ws._onDataChannelMessage = (data) => {
+    try { handleInput(JSON.parse(data)); } catch {}
+  };
+
+  ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);
       switch (msg.type) {
-        case 'move':    mouse.moveBy(msg.data.dx, msg.data.dy); break;
-        case 'moveTo':  mouse.moveTo(msg.data.x, msg.data.y); break;
-        case 'click':   mouse.click(); break;
-        case 'rightClick': mouse.rightClick(); break;
-        case 'mouseDown':  mouse.mouseDown(); break;
-        case 'mouseUp':    mouse.mouseUp(); break;
-        case 'scroll':     mouse.scroll(msg.data.dx || 0, msg.data.dy || 0); break;
-        case 'typeText':   mouse.typeText(msg.data.text || ''); break;
-        case 'combo':      mouse.comboKey(msg.data.keyCode, msg.data.modifiers || []); break;
-        case 'startStream': stream.addWsClient(ws); break;
-        case 'stopStream':  stream.removeWsClient(ws); break;
-        case 'setQuality':  stream.setQuality(msg.data.scale, msg.data.quality); break;
-        case 'ping':        ws.send(JSON.stringify({ type: 'pong' })); break;
+        // WebRTC signaling
+        case 'offer': {
+          const answerSdp = await stream.handleOffer(ws, msg.sdp);
+          ws.send(JSON.stringify({ type: 'answer', sdp: answerSdp }));
+          break;
+        }
+        case 'ice':
+          await stream.handleIce(ws, msg.candidate);
+          break;
+
+        // Bitrate control (replaces old setQuality)
+        case 'setBitrate':
+          stream.setBitrate(msg.data.kbps);
+          break;
+
+        // Input commands (fallback over WebSocket if DataChannel not ready)
+        default:
+          handleInput(msg);
+          break;
+
+        case 'ping':
+          ws.send(JSON.stringify({ type: 'pong' }));
+          break;
       }
     } catch (e) {
       console.error('Error:', e.message);
     }
   });
 
-  ws.on('close', () => console.log('Client disconnected'));
+  ws.on('close', () => {
+    stream.removePeer(ws);
+    console.log('Client disconnected');
+  });
 });
 
 function getLocalIP() {
