@@ -32,6 +32,7 @@ func log(_ msg: String) {
 class H264Encoder {
     var session: VTCompressionSession?
     var forceKeyframe = false
+    var currentBitrate: Int = 0
     let width: Int
     let height: Int
 
@@ -64,6 +65,7 @@ class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse) // no B-frames
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
+        currentBitrate = bitrate * 1000
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber) // 1 IDR per second
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
 
@@ -74,6 +76,7 @@ class H264Encoder {
     func setBitrate(_ bps: Int) {
         guard let session = session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+        currentBitrate = bps
         log("Bitrate updated: \(bps / 1000)kbps")
     }
 
@@ -185,7 +188,7 @@ extension CMSampleBuffer {
     }
 }
 class StreamOutput: NSObject, SCStreamOutput {
-    let encoder: H264Encoder
+    var encoder: H264Encoder
     var frameCount = 0
 
     init(encoder: H264Encoder) {
@@ -216,7 +219,7 @@ func startCapture() async throws {
     guard let display = content.displays.first else { log("No display"); exit(1) }
     let w = Int(Double(display.width) * scale), h = Int(Double(display.height) * scale)
 
-    let encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
+    var encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
 
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let config = SCStreamConfiguration()
@@ -250,6 +253,23 @@ func startCapture() async throws {
                 } else if cmd.hasPrefix("BITRATE:") {
                     if let bps = Int(cmd.split(separator: ":")[1]) {
                         encoder.setBitrate(bps * 1000)
+                    }
+                } else if cmd.hasPrefix("SCALE:") {
+                    if let newScale = Double(cmd.split(separator: ":")[1]) {
+                        let nw = Int(Double(display.width) * newScale)
+                        let nh = Int(Double(display.height) * newScale)
+                        let newConfig = SCStreamConfiguration()
+                        newConfig.width = nw; newConfig.height = nh
+                        newConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+                        newConfig.queueDepth = 3; newConfig.pixelFormat = kCVPixelFormatType_32BGRA; newConfig.showsCursor = false
+                        Task {
+                            try? await s.updateConfiguration(newConfig)
+                            // Recreate encoder with new dimensions
+                            let currentBitrate = encoder.currentBitrate
+                            encoder = H264Encoder(width: nw, height: nh, fps: fps, bitrate: currentBitrate / 1000)
+                            o.encoder = encoder
+                            log("Scale updated: \(nw)x\(nh)")
+                        }
                     }
                 }
             }

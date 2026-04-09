@@ -141,12 +141,12 @@ let bwCurrent = 0;
 
 // Bitrate presets (kbps)
 const BITRATE_PRESETS = [
-  { label: 'SD',  kbps: 500 },
-  { label: 'HD',  kbps: 1500 },
-  { label: 'FHD', kbps: 3000 },
-  { label: 'UHD', kbps: 5000 },
+  { label: 'SD',  kbps: 500,  scale: 0.5 },
+  { label: 'HD',  kbps: 1500, scale: 0.75 },
+  { label: 'FHD', kbps: 3000, scale: 1 },
+  { label: 'UHD', kbps: 5000, scale: 2 },
 ];
-let bitrateIdx = 1; // default HD
+let bitrateIdx = 2; // default FHD
 const qualityBadge = document.getElementById('qualityBadge');
 qualityBadge.textContent = BITRATE_PRESETS[bitrateIdx].label;
 
@@ -155,7 +155,7 @@ qualityBadge.addEventListener('click', (e) => {
   bitrateIdx = (bitrateIdx + 1) % BITRATE_PRESETS.length;
   const p = BITRATE_PRESETS[bitrateIdx];
   qualityBadge.textContent = p.label;
-  wsSend('setBitrate', { kbps: p.kbps });
+  wsSend('setQuality', { kbps: p.kbps, scale: p.scale });
 });
 
 statusEl.addEventListener('click', (e) => {

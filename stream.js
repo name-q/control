@@ -191,6 +191,15 @@ function createStream(opts = {}) {
     if (proc && proc.stdin.writable) proc.stdin.write(`BITRATE:${kbps}\n`);
     console.log(`[stream] bitrate: ${kbps}kbps`);
   }
+  function setQuality(kbps, scale) {
+    cfg.bitrate = kbps;
+    cfg.scale = scale;
+    if (proc && proc.stdin.writable) {
+      proc.stdin.write(`BITRATE:${kbps}\n`);
+      proc.stdin.write(`SCALE:${scale}\n`);
+    }
+    console.log(`[stream] quality: ${kbps}kbps scale=${scale}`);
+  }
   function stop() {
     if (proc) { proc.kill(); proc = null; }
     for (const [, p] of peers) p.pc.close();
@@ -198,7 +207,7 @@ function createStream(opts = {}) {
   }
   function getScreenSize() { return screenSize; }
 
-  return { ready: readyPromise, createPeer, handleAnswer, handleIce, removePeer, requestKeyframe, setBitrate, start, stop, getScreenSize };
+  return { ready: readyPromise, createPeer, handleAnswer, handleIce, removePeer, requestKeyframe, setBitrate, setQuality, start, stop, getScreenSize };
 }
 
 module.exports = { createStream };

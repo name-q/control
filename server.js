@@ -196,6 +196,9 @@ wss.on('connection', (ws) => {
         case 'setBitrate':
           stream.setBitrate(msg.data.kbps);
           break;
+        case 'setQuality':
+          stream.setQuality(msg.data.kbps, msg.data.scale);
+          break;
 
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
