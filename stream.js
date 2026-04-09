@@ -96,7 +96,7 @@ function createStream(opts = {}) {
 
   function getScreenSize() { return screenSize; }
 
-  return { ready: readyPromise, createPeer, forwardToCapture, removePeer, setBitrate, setScale, stop, getScreenSize };
+  return { ready: readyPromise, createPeer, forwardToCapture, removePeer, stop, getScreenSize };
 }
 
 module.exports = { createStream };
