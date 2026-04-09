@@ -115,22 +115,17 @@ class WebRTCManager {
         // 1. RTCP SR Reporter — sends sender reports for sync
         rtcChainRtcpSrReporter(trackId)
 
-        // 2. NACK Responder — auto-retransmit lost packets (cache 512 packets ≈ 17 frames)
+        // 2. NACK Responder — auto-retransmit lost packets
         rtcChainRtcpNackResponder(trackId, 512)
 
-        // 3. Pacing — smooth out burst sends, prevent UDP congestion
-        rtcChainPacingHandler(trackId, Double(defaultBitrate * 1000), 10) // 10ms intervals
-
-        // 4. PLI Handler — browser requests keyframe on packet loss
+        // 3. PLI Handler — browser requests keyframe on packet loss
         rtcChainPliHandler(trackId) { tr, ptr in
             log("[webrtc] PLI → forcing IDR")
-            // Set flag — encoder will pick it up on next frame
             pliReceived = true
         }
 
         // 5. REMB Handler — browser reports available bandwidth
         rtcChainRembHandler(trackId) { tr, bitrate, ptr in
-            log("[webrtc] REMB: \(bitrate / 1000)kbps")
             rembBitrate = bitrate
         }
 
