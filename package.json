@@ -10,7 +10,6 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "node-datachannel": "^0.32.2",
     "ws": "^8.20.0"
   }
 }

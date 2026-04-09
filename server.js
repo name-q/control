@@ -168,43 +168,30 @@ wss.on('connection', (ws) => {
   console.log('Client connected');
   ws.send(JSON.stringify({ type: 'screen', data: { ...mouse.getScreenSize(), platform: os.platform() } }));
 
-  // DataChannel input handler (set by stream.js when DC is established)
-  ws._onDataChannelMessage = (data) => {
-    try { handleInput(JSON.parse(data)); } catch {}
-  };
-
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);
-      if (msg.type !== 'move' && msg.type !== 'moveTo' && msg.type !== 'scroll') {
-        console.log('[server] msg:', msg.type);
-      }
       switch (msg.type) {
-        // WebRTC signaling — server is offerer
+        // WebRTC signaling — forward to capture process
         case 'startStream':
           stream.createPeer(ws);
           break;
         case 'answer':
-          stream.handleAnswer(ws, msg.sdp, msg.type);
-          break;
         case 'ice':
-          console.log('[server] ICE from browser');
-          stream.handleIce(ws, msg.candidate);
+          stream.forwardToCapture(ws, msg);
           break;
 
-        // Bitrate control (replaces old setQuality)
-        case 'setBitrate':
-          stream.setBitrate(msg.data.kbps);
-          break;
+        // Quality control
         case 'setQuality':
-          stream.setQuality(msg.data.kbps, msg.data.scale);
+          stream.setBitrate(ws, msg.data.kbps);
+          stream.setScale(ws, msg.data.scale);
           break;
 
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
           break;
 
-        // Input commands (fallback over WebSocket if DataChannel not ready)
+        // Input commands
         default:
           handleInput(msg);
           break;

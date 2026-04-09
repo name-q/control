@@ -1,314 +1,365 @@
-// macOS Screen Capture — ScreenCaptureKit + VideoToolbox H264 Encoding
+// V3: Screen Capture + H264 Encode + WebRTC Direct Send
 //
-// Protocol (stdout):
-//   READY:<screenW>:<screenH>\n
-//   CURSOR:<x>:<y>\n
-//   NALU:<len>:<ts>:<isKey>\n<h264Data>
+// Video path: ScreenCaptureKit → VideoToolbox H264 → libdatachannel RTP → UDP → Browser
+// Signaling: stdin JSON ← Node, stdout JSON → Node
+// Cursor: stdout CURSOR:x:y → Node → WebSocket → Browser
 //
-// Protocol (stdin):
-//   KEYFRAME\n          — force IDR frame
-//   BITRATE:<bps>\n     — change target bitrate
-//
-// Args: capture [fps] [scale] [bitrate_kbps]
+// Args: capture [fps] [scale] [bitrate_kbps] [bindAddress]
 
-import Cocoa
+import Foundation
 import ScreenCaptureKit
 import CoreMedia
-import CoreGraphics
 import VideoToolbox
-import Foundation
 
 let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 30 : 30
 let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 1 : 1
-let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 2000 : 2000
+let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 3000 : 3000
+let bindAddr = CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : nil
 
-let stdoutHandle = FileHandle.standardOutput
-let stderrHandle = FileHandle.standardError
+let stdoutH = FileHandle.standardOutput
+let stderrH = FileHandle.standardError
+func log(_ msg: String) { stderrH.write(Data((msg + "\n").utf8)) }
+func output(_ msg: String) { stdoutH.write(Data((msg + "\n").utf8)) }
 
-func log(_ msg: String) {
-    stderrHandle.write(Data((msg + "\n").utf8))
+// ========== WebRTC Manager (libdatachannel C API) ==========
+class WebRTCManager {
+    var pcId: Int32 = -1
+    var trackId: Int32 = -1
+    var trackOpen = false
+
+    init(bindAddress: String?) {
+        var config = rtcConfiguration()
+        memset(&config, 0, MemoryLayout<rtcConfiguration>.size)
+        config.iceServersCount = 0
+        if let addr = bindAddress {
+            addr.withCString { config.bindAddress = $0; self.createPC(&config) }
+        } else {
+            createPC(&config)
+        }
+    }
+
+    private func createPC(_ config: inout rtcConfiguration) {
+        pcId = rtcCreatePeerConnection(&config)
+        guard pcId >= 0 else { log("Failed to create PeerConnection"); return }
+
+        rtcSetLocalDescriptionCallback(pcId) { pc, sdp, type, ptr in
+            guard let sdp = sdp, let type = type else { return }
+            let sdpStr = String(cString: sdp)
+            let typeStr = String(cString: type)
+            output("{\"type\":\"\(typeStr)\",\"sdp\":\(WebRTCManager.jsonEscape(sdpStr))}")
+        }
+
+        rtcSetLocalCandidateCallback(pcId) { pc, cand, mid, ptr in
+            guard let cand = cand, let mid = mid else { return }
+            var c = String(cString: cand)
+            if c.hasPrefix("a=") { c = String(c.dropFirst(2)) }
+            let m = String(cString: mid)
+            output("{\"type\":\"ice\",\"candidate\":{\"candidate\":\(WebRTCManager.jsonEscape(c)),\"sdpMid\":\(WebRTCManager.jsonEscape(m))}}")
+        }
+
+        rtcSetStateChangeCallback(pcId) { pc, state, ptr in
+            let states = ["new","connecting","connected","disconnected","failed","closed"]
+            let s = state >= 0 && state < states.count ? states[Int(state)] : "unknown"
+            log("[webrtc] connection: \(s)")
+        }
+
+        rtcSetIceStateChangeCallback(pcId) { pc, state, ptr in
+            let states = ["new","checking","connected","completed","failed","disconnected","closed"]
+            let s = state >= 0 && state < states.count ? states[Int(state)] : "unknown"
+            log("[webrtc] ICE: \(s)")
+        }
+
+        // DataChannel callback (browser creates it for input)
+        rtcSetDataChannelCallback(pcId) { pc, dc, ptr in
+            log("[webrtc] DataChannel received")
+            rtcSetMessageCallback(dc) { id, msg, size, ptr in
+                // Forward to stdout for Node to handle
+                guard let msg = msg else { return }
+                let data = size < 0 ? String(cString: msg) : String(data: Data(bytes: msg, count: Int(size)), encoding: .utf8) ?? ""
+                output("{\"type\":\"dc\",\"data\":\(data)}")
+            }
+        }
+    }
+
+    func addH264Track(ssrc: UInt32) {
+        var init_ = rtcTrackInit()
+        memset(&init_, 0, MemoryLayout<rtcTrackInit>.size)
+        init_.direction = 1 // RTC_DIRECTION_SENDONLY
+        init_.codec = 0     // RTC_CODEC_H264
+        init_.payloadType = 96
+        init_.ssrc = ssrc
+
+        "video".withCString { mid in
+            "screen".withCString { name in
+                init_.mid = mid
+                init_.name = name
+                trackId = rtcAddTrackEx(pcId, &init_)
+            }
+        }
+        guard trackId >= 0 else { log("Failed to add track"); return }
+
+        // Set H264 packetizer
+        var pktInit = rtcPacketizerInit()
+        memset(&pktInit, 0, MemoryLayout<rtcPacketizerInit>.size)
+        pktInit.ssrc = ssrc
+        "screen".withCString { pktInit.cname = $0 }
+        pktInit.payloadType = 96
+        pktInit.clockRate = 90000
+        pktInit.maxFragmentSize = 1200 // MTU-safe
+        pktInit.nalSeparator = 2 // RTC_NAL_SEPARATOR_LONG_START_SEQUENCE
+        rtcSetH264Packetizer(trackId, &pktInit)
+
+        rtcSetOpenCallback(trackId) { id, ptr in
+            log("[webrtc] Track open")
+        }
+
+        // PLI handler — browser requests keyframe
+        rtcChainPliHandler(trackId) { tr, ptr in
+            log("[webrtc] PLI received")
+        }
+
+        log("[webrtc] H264 track added, id=\(trackId)")
+    }
+
+    func createOffer() {
+        rtcSetLocalDescription(pcId, nil) // nil = auto (offer since we have track)
+    }
+
+    func setRemoteDescription(_ sdp: String, type: String) {
+        sdp.withCString { s in
+            type.withCString { t in
+                rtcSetRemoteDescription(pcId, s, t)
+            }
+        }
+    }
+
+    func addRemoteCandidate(_ candidate: String, mid: String) {
+        candidate.withCString { c in
+            mid.withCString { m in
+                rtcAddRemoteCandidate(pcId, c, m)
+            }
+        }
+    }
+
+    func sendH264(_ data: Data) {
+        guard trackId >= 0 else { return }
+        data.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            rtcSendMessage(trackId, base.assumingMemoryBound(to: CChar.self), Int32(data.count))
+        }
+    }
+
+    static func jsonEscape(_ s: String) -> String {
+        let escaped = s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        return "\"\(escaped)\""
+    }
 }
-
+// ========== H264 Encoder ==========
 class H264Encoder {
     var session: VTCompressionSession?
     var forceKeyframe = false
-    var currentBitrate: Int = 0
-    let width: Int
-    let height: Int
+    var webrtc: WebRTCManager?
 
     init(width: Int, height: Int, fps: Double, bitrate: Int) {
-        self.width = width
-        self.height = height
-
         var s: VTCompressionSession?
-        let status = VTCompressionSessionCreate(
-            allocator: nil,
-            width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ] as CFDictionary,
-            compressedDataAllocator: nil,
-            outputCallback: nil,
-            refcon: nil,
-            compressionSessionOut: &s
-        )
-        guard status == noErr, let session = s else {
-            log("Failed to create VTCompressionSession: \(status)")
-            exit(1)
-        }
+        VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
+            codecType: kCMVideoCodecType_H264, encoderSpecification: nil,
+            imageBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA] as CFDictionary,
+            compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &s)
+        guard let session = s else { log("VTCompressionSession failed"); exit(1) }
         self.session = session
 
-        // Low-latency realtime encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
-        currentBitrate = bitrate * 1000
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber) // IDR every 1s
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1.0 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
-
         VTCompressionSessionPrepareToEncodeFrames(session)
         log("H264 encoder: \(width)x\(height) @ \(Int(fps))fps, \(bitrate)kbps")
     }
 
     func setBitrate(_ bps: Int) {
-        guard let session = session else { return }
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-        currentBitrate = bps
-        log("Bitrate updated: \(bps / 1000)kbps")
+        guard let s = session else { return }
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
     }
 
-    func encode(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
-        guard let session = session else { return }
-
+    func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
+        guard let s = session else { return }
         var flags: VTEncodeInfoFlags = []
-        var properties: CFDictionary?
+        var props: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+        if forceKeyframe { forceKeyframe = false }
 
-        if forceKeyframe {
-            forceKeyframe = false
-            properties = [
-                kVTEncodeFrameOptionKey_ForceKeyFrame: true
-            ] as CFDictionary
-        }
-
-        VTCompressionSessionEncodeFrame(
-            session,
-            imageBuffer: pixelBuffer,
-            presentationTimeStamp: timestamp,
-            duration: .invalid,
-            frameProperties: properties,
-            infoFlagsOut: &flags
-        ) { [self] status, flags, sampleBuffer in
-            guard status == noErr, let sb = sampleBuffer else { return }
-            self.outputNALU(sb)
+        VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
+            duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
+            guard status == noErr, let sb = sb, let self = self, let webrtc = self.webrtc else { return }
+            self.sendToWebRTC(sb, webrtc: webrtc)
         }
     }
 
-    func outputNALU(_ sampleBuffer: CMSampleBuffer) {
-        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-
-        let isKey = sampleBuffer.isKeyFrame
-        let ts = UInt64(Date().timeIntervalSince1970 * 1000)
-
-        // Get SPS/PPS from keyframes
-        if isKey, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
-            var spsData = Data()
-
-            // Extract SPS
-            var spsSize: Int = 0, spsCount: Int = 0
-            var spsPtr: UnsafePointer<UInt8>?
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(formatDesc, parameterSetIndex: 0, parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsSize, parameterSetCountOut: &spsCount, nalUnitHeaderLengthOut: nil) == noErr, let ptr = spsPtr {
-                // Annex-B start code + SPS
-                spsData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
-                spsData.append(ptr, count: spsSize)
-            }
-
-            // Extract PPS
-            var ppsSize: Int = 0
-            var ppsPtr: UnsafePointer<UInt8>?
-            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(formatDesc, parameterSetIndex: 1, parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsSize, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr, let ptr = ppsPtr {
-                spsData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
-                spsData.append(ptr, count: ppsSize)
-            }
-
-            if !spsData.isEmpty {
-                writeNALU(spsData, ts: ts, isKey: true)
-            }
-        }
-
-        // Extract NAL units from data buffer (AVCC format → Annex-B)
-        var totalLength: Int = 0
-        CMBlockBufferGetDataLength(dataBuffer)
-        var lengthAtOffset: Int = 0
-        var dataPointer: UnsafeMutablePointer<Int8>?
-        CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
-
-        guard let ptr = dataPointer else { return }
-
+    private func sendToWebRTC(_ sb: CMSampleBuffer, webrtc: WebRTCManager) {
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sb) else { return }
+        let isKey = sb.isKeyFrame
         var annexB = Data()
+
+        // SPS/PPS for keyframes
+        if isKey, let fmt = CMSampleBufferGetFormatDescription(sb) {
+            var spsPtr: UnsafePointer<UInt8>?; var spsSize = 0
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, parameterSetIndex: 0,
+                parameterSetPointerOut: &spsPtr, parameterSetSizeOut: &spsSize, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr, let p = spsPtr {
+                annexB.append(contentsOf: [0,0,0,1]); annexB.append(p, count: spsSize)
+            }
+            var ppsPtr: UnsafePointer<UInt8>?; var ppsSize = 0
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, parameterSetIndex: 1,
+                parameterSetPointerOut: &ppsPtr, parameterSetSizeOut: &ppsSize, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr, let p = ppsPtr {
+                annexB.append(contentsOf: [0,0,0,1]); annexB.append(p, count: ppsSize)
+            }
+        }
+
+        // AVCC → Annex-B
+        var totalLen = 0; var dataPtr: UnsafeMutablePointer<Int8>?
+        CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLen, dataPointerOut: &dataPtr)
+        guard let ptr = dataPtr else { return }
         var offset = 0
-        while offset < totalLength {
-            // Read 4-byte AVCC length prefix
-            var naluLen: UInt32 = 0
-            memcpy(&naluLen, ptr + offset, 4)
-            naluLen = naluLen.bigEndian
-            offset += 4
-
-            // Annex-B start code + NALU data
-            annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
-            annexB.append(Data(bytes: ptr + offset, count: Int(naluLen)))
-            offset += Int(naluLen)
+        while offset < totalLen {
+            var naluLen: UInt32 = 0; memcpy(&naluLen, ptr + offset, 4); naluLen = naluLen.bigEndian; offset += 4
+            annexB.append(contentsOf: [0,0,0,1]); annexB.append(Data(bytes: ptr + offset, count: Int(naluLen))); offset += Int(naluLen)
         }
 
-        if !annexB.isEmpty {
-            writeNALU(annexB, ts: ts, isKey: isKey)
-        }
-    }
-
-    func writeNALU(_ data: Data, ts: UInt64, isKey: Bool) {
-        let header = Data("NALU:\(data.count):\(ts):\(isKey ? 1 : 0)\n".utf8)
-        stdoutHandle.write(header)
-        stdoutHandle.write(data)
-    }
-
-    deinit {
-        if let session = session {
-            VTCompressionSessionInvalidate(session)
-        }
+        // Send directly to WebRTC — zero pipe, zero Node, zero copy
+        webrtc.sendH264(annexB)
     }
 }
 
 extension CMSampleBuffer {
     var isKeyFrame: Bool {
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(self, createIfNecessary: false) as? [[CFString: Any]],
-              let first = attachments.first else { return true }
-        return !(first[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
+        guard let a = CMSampleBufferGetSampleAttachmentsArray(self, createIfNecessary: false) as? [[CFString: Any]],
+              let f = a.first else { return true }
+        return !(f[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
     }
 }
+// ========== Stream Output ==========
 class StreamOutput: NSObject, SCStreamOutput {
-    var encoder: H264Encoder
-    var frameCount = 0
+    let encoder: H264Encoder
 
-    init(encoder: H264Encoder) {
-        self.encoder = encoder
-        super.init()
-    }
-
-    var skipCount = 0
-    var encodeCount = 0
-    var lastStatTime: UInt64 = 0
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        // Cursor position (always send)
-        let cursorLoc = CGEvent(source: nil)?.location ?? .zero
-        stdoutHandle.write(Data("CURSOR:\(Int(cursorLoc.x)):\(Int(cursorLoc.y))\n".utf8))
-
-        // Skip unchanged frames
-        if !isDirty(sampleBuffer) { skipCount += 1 }
-        else {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            encoder.encode(pb, timestamp: pts)
-            encodeCount += 1
-        }
-
-        let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        if now - lastStatTime > 3000 {
-            log("encode=\(encodeCount) skip=\(skipCount)")
-            encodeCount = 0; skipCount = 0; lastStatTime = now
-        }
-    }
+    init(encoder: H264Encoder) { self.encoder = encoder; super.init() }
 
     func isDirty(_ sb: CMSampleBuffer) -> Bool {
         guard let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [NSDictionary],
-              let first = arr.first else {
-            return true
-        }
-        // Check SCStreamUpdateFrameStatus: 0 = complete, 1 = idle, 2 = blank, 3 = suspended
-        if let status = first["SCStreamUpdateFrameStatus"] as? NSNumber, status.intValue != 0 {
-            return false // not a complete frame
-        }
-        guard let rects = first["SCStreamUpdateFrameDirtyRect"] as? [NSDictionary] else {
-            return true
-        }
+              let first = arr.first else { return true }
+        if let status = first["SCStreamUpdateFrameStatus"] as? NSNumber, status.intValue != 0 { return false }
+        guard let rects = first["SCStreamUpdateFrameDirtyRect"] as? [NSDictionary] else { return true }
         for r in rects {
-            let w = (r["Width"] as? NSNumber)?.doubleValue ?? 0
-            let h = (r["Height"] as? NSNumber)?.doubleValue ?? 0
-            if w > 0 && h > 0 { return true }
+            if ((r["Width"] as? NSNumber)?.doubleValue ?? 0) > 0 && ((r["Height"] as? NSNumber)?.doubleValue ?? 0) > 0 { return true }
         }
         return false
     }
-}
 
-func startCapture() async throws {
-    if !CGRequestScreenCaptureAccess() {
-        log("Screen recording permission denied")
-        exit(1)
+    func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+
+        // Cursor (always send via stdout → Node → WebSocket)
+        let loc = CGEvent(source: nil)?.location ?? .zero
+        output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
+
+        if !isDirty(sb) { return }
+        encoder.encode(pb, timestamp: CMSampleBufferGetPresentationTimeStamp(sb))
     }
+}
+// ========== Start Capture ==========
+func startCapture() async throws {
+    if !CGRequestScreenCaptureAccess() { log("Screen recording denied"); exit(1) }
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
     guard let display = content.displays.first else { log("No display"); exit(1) }
     let w = Int(Double(display.width) * scale), h = Int(Double(display.height) * scale)
 
-    var encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
+    // WebRTC
+    let webrtc = WebRTCManager(bindAddress: bindAddr)
+    let ssrc = UInt32.random(in: 1...UInt32.max)
+    webrtc.addH264Track(ssrc: ssrc)
 
-    let filter = SCContentFilter(display: display, excludingWindows: [])
-    let config = SCStreamConfiguration()
-    config.width = w; config.height = h
-    config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-    config.queueDepth = 3; config.pixelFormat = kCVPixelFormatType_32BGRA; config.showsCursor = false
-    let s = SCStream(filter: filter, configuration: config, delegate: nil)
+    // Encoder
+    let encoder = H264Encoder(width: w, height: h, fps: fps, bitrate: defaultBitrate)
+    encoder.webrtc = webrtc
+
+    // Screen capture
+    let cfg = SCStreamConfiguration()
+    cfg.width = w; cfg.height = h
+    cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+    cfg.queueDepth = 3; cfg.pixelFormat = kCVPixelFormatType_32BGRA; cfg.showsCursor = false
+    let s = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: cfg, delegate: nil)
     let o = StreamOutput(encoder: encoder)
     try s.addStreamOutput(o, type: .screen, sampleHandlerQueue: DispatchQueue(label: "cap"))
     try await s.startCapture()
 
-    stdoutHandle.write(Data("READY:\(display.width):\(display.height)\n".utf8))
-    log("Streaming \(display.width)x\(display.height) -> \(w)x\(h) @ \(Int(fps))fps H264 \(defaultBitrate)kbps")
+    // Signal ready
+    output("READY:\(display.width):\(display.height)")
+    log("Streaming \(display.width)x\(display.height) → \(w)x\(h) @ \(Int(fps))fps H264 \(defaultBitrate)kbps")
+
+    // Create offer (server is offerer)
+    webrtc.createOffer()
 
     // stdin command loop (non-blocking poll)
-    let stdinFd: Int32 = 0
+    let fd: Int32 = 0
     var stdinBuf = ""
     while true {
-        try await Task.sleep(nanoseconds: 100_000_000)
-        var pfd = pollfd(fd: stdinFd, events: Int16(POLLIN), revents: 0)
+        try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         while poll(&pfd, 1, 0) > 0 && (pfd.revents & Int16(POLLIN) != 0) {
             var byte: [UInt8] = [0]
-            let n = read(stdinFd, &byte, 1)
+            let n = read(fd, &byte, 1)
             if n <= 0 { exit(0) }
             stdinBuf += String(UnicodeScalar(byte[0]))
             if byte[0] == 0x0a {
-                let cmd = stdinBuf.trimmingCharacters(in: .whitespacesAndNewlines)
+                let line = stdinBuf.trimmingCharacters(in: .whitespacesAndNewlines)
                 stdinBuf = ""
-                if cmd == "KEYFRAME" {
-                    encoder.forceKeyframe = true
-                } else if cmd.hasPrefix("BITRATE:") {
-                    if let bps = Int(cmd.split(separator: ":")[1]) {
-                        encoder.setBitrate(bps * 1000)
-                    }
-                } else if cmd.hasPrefix("SCALE:") {
-                    if let newScale = Double(cmd.split(separator: ":")[1]) {
-                        let nw = Int(Double(display.width) * newScale)
-                        let nh = Int(Double(display.height) * newScale)
-                        let newConfig = SCStreamConfiguration()
-                        newConfig.width = nw; newConfig.height = nh
-                        newConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-                        newConfig.queueDepth = 3; newConfig.pixelFormat = kCVPixelFormatType_32BGRA; newConfig.showsCursor = false
-                        Task {
-                            try? await s.updateConfiguration(newConfig)
-                            // Recreate encoder with new dimensions
-                            let currentBitrate = encoder.currentBitrate
-                            encoder = H264Encoder(width: nw, height: nh, fps: fps, bitrate: currentBitrate / 1000)
-                            o.encoder = encoder
-                            log("Scale updated: \(nw)x\(nh)")
-                        }
-                    }
-                }
+                handleStdinCommand(line, webrtc: webrtc, encoder: encoder, stream: s, display: display)
             }
             pfd.revents = 0
         }
+    }
+}
+
+func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: H264Encoder, stream: SCStream, display: SCDisplay) {
+    guard let data = json.data(using: .utf8),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let type = obj["type"] as? String else { return }
+
+    switch type {
+    case "answer":
+        if let sdp = obj["sdp"] as? String {
+            webrtc.setRemoteDescription(sdp, type: "answer")
+            log("[stdin] Answer applied")
+        }
+    case "ice":
+        if let cand = obj["candidate"] as? [String: Any],
+           let candidate = cand["candidate"] as? String,
+           let mid = cand["sdpMid"] as? String {
+            webrtc.addRemoteCandidate(candidate, mid: mid)
+        }
+    case "keyframe":
+        encoder.forceKeyframe = true
+    case "bitrate":
+        if let kbps = obj["kbps"] as? Int {
+            encoder.setBitrate(kbps * 1000)
+            log("[stdin] Bitrate: \(kbps)kbps")
+        }
+    case "scale":
+        if let newScale = obj["scale"] as? Double {
+            let nw = Int(Double(display.width) * newScale)
+            let nh = Int(Double(display.height) * newScale)
+            let newCfg = SCStreamConfiguration()
+            newCfg.width = nw; newCfg.height = nh
+            newCfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+            newCfg.queueDepth = 3; newCfg.pixelFormat = kCVPixelFormatType_32BGRA; newCfg.showsCursor = false
+            Task { try? await stream.updateConfiguration(newCfg) }
+            log("[stdin] Scale: \(nw)x\(nh)")
+        }
+    default: break
     }
 }
 Task {

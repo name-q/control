@@ -1,14 +1,19 @@
 #!/bin/bash
 set -e
-echo "Compiling capture..."
+echo "Compiling capture (V3: Swift + libdatachannel)..."
 swiftc -O -o capture capture.swift \
+  -import-objc-header rtc_bridge.h \
+  -I/usr/local/include \
+  -L/usr/local/lib \
+  -ldatachannel \
+  -Xlinker -rpath -Xlinker /usr/local/lib \
   -framework ScreenCaptureKit \
   -framework CoreMedia \
   -framework CoreGraphics \
   -framework VideoToolbox \
   -framework AppKit
 
-# Package into .app bundle (required for macOS 15+ screen recording permission dialog)
+# Package into .app bundle
 APP="ScreenCapture.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp capture "$APP/Contents/MacOS/capture"
@@ -25,16 +30,16 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
     <key>CFBundleExecutable</key>
     <string>capture</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>3.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Remote Control needs screen capture to stream your desktop to your phone.</string>
+    <string>Remote Control needs screen capture to stream your desktop.</string>
 </dict>
 </plist>
 EOF
 
 codesign -s - -f "$APP"
-echo "Done: $APP (com.control.capture)"
+echo "Done: $APP (V3 with libdatachannel)"

@@ -9,12 +9,12 @@
     <key>CFBundleExecutable</key>
     <string>capture</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>3.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Remote Control needs screen capture to stream your desktop to your phone.</string>
+    <string>Remote Control needs screen capture to stream your desktop.</string>
 </dict>
 </plist>
