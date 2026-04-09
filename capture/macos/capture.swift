@@ -18,7 +18,7 @@ import CoreGraphics
 import VideoToolbox
 import Foundation
 
-let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 30 : 30
+let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 60 : 60
 let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 1 : 1
 let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 2000 : 2000
 
@@ -191,8 +191,6 @@ extension CMSampleBuffer {
 class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
     var frameCount = 0
-    var idleFrames = 0
-    let maxIdleFrames = 3
 
     init(encoder: H264Encoder) {
         self.encoder = encoder
@@ -206,14 +204,8 @@ class StreamOutput: NSObject, SCStreamOutput {
         let cursorLoc = CGEvent(source: nil)?.location ?? .zero
         stdoutHandle.write(Data("CURSOR:\(Int(cursorLoc.x)):\(Int(cursorLoc.y))\n".utf8))
 
-        // Use ScreenCaptureKit's native dirty rects — zero CPU overhead
-        let dirty = isDirty(sampleBuffer)
-        if !dirty {
-            idleFrames += 1
-            if idleFrames > maxIdleFrames { return }
-        } else {
-            idleFrames = 0
-        }
+        // Skip unchanged frames (ScreenCaptureKit native dirty rects)
+        if !isDirty(sampleBuffer) { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         encoder.encode(pb, timestamp: pts)

@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const ndc = require('node-datachannel');
 
-const DEFAULTS = { fps: 30, scale: 1, bitrate: 2000 };
+const DEFAULTS = { fps: 60, scale: 1, bitrate: 3000 };
 
 function getCaptureCommand() {
   const platform = os.platform();
