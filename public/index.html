@@ -135,9 +135,9 @@ let pc = null, dataChannel = null;
 let streamStarted = false;
 
 // FPS & latency tracking
-let showStats = false, fpsFrames = 0, fpsLast = Date.now(), fpsCurrent = 0;
-let latency = 0, pingSent = 0;
-let bwBytes = 0, bwLast = Date.now(), bwCurrent = 0;
+let showStats = false, fpsCurrent = 0;
+let latency = 0;
+let bwCurrent = 0;
 
 // Bitrate presets (kbps)
 const BITRATE_PRESETS = [
@@ -174,28 +174,35 @@ function formatLatency(ms) {
   return ms + 'ms';
 }
 
-function updateStats() {
-  fpsFrames++;
-  const now = Date.now();
-  if (now - fpsLast >= 1000) {
-    fpsCurrent = fpsFrames;
-    fpsFrames = 0;
-    bwCurrent = bwBytes;
-    bwBytes = 0;
-    fpsLast = now;
-  }
-  if (showStats) {
-    statusEl.textContent = `${fpsCurrent} FPS · ${formatLatency(latency)} · ${formatBW(bwCurrent)}`;
-  }
-}
+// Stats polling via WebRTC getStats
+let lastStatsBytes = 0, lastStatsFrames = 0, lastStatsTime = Date.now();
 
-function pingLoop() {
-  if (ws && ws.readyState === 1) {
-    pingSent = Date.now();
-    send('ping');
-  }
-  setTimeout(pingLoop, 2000);
+function pollStats() {
+  if (!pc || !showStats) { setTimeout(pollStats, 1000); return; }
+  pc.getStats().then(stats => {
+    const now = Date.now();
+    const elapsed = (now - lastStatsTime) / 1000;
+    stats.forEach(s => {
+      if (s.type === 'inbound-rtp' && s.kind === 'video') {
+        const bytes = s.bytesReceived || 0;
+        const frames = s.framesDecoded || 0;
+        bwCurrent = Math.round((bytes - lastStatsBytes) / elapsed);
+        fpsCurrent = Math.round((frames - lastStatsFrames) / elapsed);
+        lastStatsBytes = bytes;
+        lastStatsFrames = frames;
+      }
+      if (s.type === 'candidate-pair' && s.state === 'succeeded') {
+        latency = Math.round(s.currentRoundTripTime * 1000) || latency;
+      }
+    });
+    lastStatsTime = now;
+    if (showStats) {
+      statusEl.textContent = `${fpsCurrent} FPS · ${formatLatency(latency)} · ${formatBW(bwCurrent)}`;
+    }
+  }).catch(() => {});
+  setTimeout(pollStats, 1000);
 }
+pollStats();
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -204,7 +211,6 @@ function connect() {
     statusEl.textContent = 'Connected'; statusEl.className = '';
     // Tell server to create WebRTC peer and send us an offer
     wsSend('startStream');
-    pingLoop();
   };
   ws.onclose = () => {
     statusEl.textContent = 'Disconnected'; statusEl.className = 'disconnected';
@@ -217,7 +223,6 @@ function connect() {
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'screen') { screenSize = msg.data; serverPlatform = msg.data.platform || 'darwin'; initComboPanel(); }
-      if (msg.type === 'pong') latency = Date.now() - pingSent;
       if (msg.type === 'cursor') updateCursor(msg.data);
       if (msg.type === 'offer') handleServerOffer(msg.sdp);
       if (msg.type === 'ice') handleRemoteIce(msg.candidate);
