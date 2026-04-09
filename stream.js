@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const ndc = require('node-datachannel');
 
-const DEFAULTS = { fps: 60, scale: 1, bitrate: 3000 };
+const DEFAULTS = { fps: 30, scale: 1, bitrate: 3000 };
 
 function getCaptureCommand() {
   const platform = os.platform();
@@ -87,10 +87,12 @@ function createStream(opts = {}) {
   }
 
   function broadcastNALU(data) {
+    // Must copy — data is a subarray view that gets invalidated
+    const copy = Buffer.from(data);
     for (const [, peer] of peers) {
       try {
         if (peer.track && peer.track.isOpen()) {
-          peer.track.sendMessageBinary(data);
+          peer.track.sendMessageBinary(copy);
         }
       } catch {}
     }

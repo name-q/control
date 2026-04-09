@@ -18,7 +18,7 @@ import CoreGraphics
 import VideoToolbox
 import Foundation
 
-let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 60 : 60
+let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 30 : 30
 let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 1 : 1
 let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 2000 : 2000
 
@@ -214,8 +214,14 @@ class StreamOutput: NSObject, SCStreamOutput {
 
     func isDirty(_ sb: CMSampleBuffer) -> Bool {
         guard let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [NSDictionary],
-              let first = arr.first,
-              let rects = first["SCStreamUpdateFrameDirtyRect"] as? [NSDictionary] else {
+              let first = arr.first else {
+            return true
+        }
+        // Check SCStreamUpdateFrameStatus: 0 = complete, 1 = idle, 2 = blank, 3 = suspended
+        if let status = first["SCStreamUpdateFrameStatus"] as? NSNumber, status.intValue != 0 {
+            return false // not a complete frame
+        }
+        guard let rects = first["SCStreamUpdateFrameDirtyRect"] as? [NSDictionary] else {
             return true
         }
         for r in rects {
