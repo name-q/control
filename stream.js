@@ -239,7 +239,9 @@ function createStream(opts = {}) {
     };
 
     await pc.setRemoteDescription({ type: 'offer', sdp });
+    console.log('[stream] Browser offer SDP:\n', sdp.substring(0, 500));
     const answer = await pc.createAnswer();
+    console.log('[stream] Server answer SDP:\n', answer.sdp.substring(0, 500));
 
     peers.set(ws, { pc, track, dataChannel: null });
 
@@ -262,7 +264,12 @@ function createStream(opts = {}) {
   async function handleIce(ws, candidate) {
     const peer = peers.get(ws);
     if (peer) {
-      await peer.pc.addIceCandidate(candidate);
+      console.log('[stream] Adding ICE candidate:', candidate.candidate?.substring(0, 60));
+      try {
+        await peer.pc.addIceCandidate(candidate);
+      } catch (e) {
+        console.error('[stream] ICE error:', e.message);
+      }
     }
   }
 

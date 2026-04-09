@@ -242,55 +242,28 @@ function wsSend(type, data = {}) {
 
 // ========== WebRTC ==========
 async function startWebRTC() {
-  pc = new RTCPeerConnection({ iceServers: [] }); // LAN, no STUN
+  pc = new RTCPeerConnection({ iceServers: [] });
 
-  // Create DataChannel for input
-  dataChannel = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
-  dataChannel.onopen = () => console.log('DataChannel open');
-  dataChannel.onclose = () => { dataChannel = null; };
-
-  // Receive video track
   pc.ontrack = (ev) => {
+    console.log('ontrack:', ev.track.kind);
     streamVideo.srcObject = ev.streams[0] || new MediaStream([ev.track]);
     streamVideo.play().catch(() => {});
     if (!streamStarted) { streamStarted = true; fitImage(); }
-    console.log('Video track received');
   };
 
-  // Trickle ICE
-  pc.onicecandidate = (ev) => {
-    if (ev.candidate) {
-      wsSend('ice', ev.candidate); // note: send candidate directly, not nested
-      // Fix: server expects { type: 'ice', candidate: {...} }
-    }
-  };
-
-  // Fix: send ice as proper format
   pc.onicecandidate = (ev) => {
     if (ev.candidate && ws && ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'ice', candidate: ev.candidate }));
     }
   };
 
-  // Stats for bandwidth tracking
-  setInterval(async () => {
-    if (!pc) return;
-    try {
-      const stats = await pc.getStats();
-      stats.forEach(s => {
-        if (s.type === 'inbound-rtp' && s.kind === 'video') {
-          const bytes = s.bytesReceived || 0;
-          if (bwLast > 0) bwBytes = bytes - (bwBytes || bytes);
-          fpsFrames = s.framesDecoded || 0;
-        }
-      });
-    } catch {}
-  }, 1000);
+  pc.onconnectionstatechange = () => console.log('PC:', pc.connectionState);
+  pc.oniceconnectionstatechange = () => console.log('ICE:', pc.iceConnectionState);
 
-  // Create offer
   pc.addTransceiver('video', { direction: 'recvonly' });
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  console.log('Offer sent');
   ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
 }
 

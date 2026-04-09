@@ -111,13 +111,13 @@ wss.on('connection', (ws) => {
           stream.setBitrate(msg.data.kbps);
           break;
 
+        case 'ping':
+          ws.send(JSON.stringify({ type: 'pong' }));
+          break;
+
         // Input commands (fallback over WebSocket if DataChannel not ready)
         default:
           handleInput(msg);
-          break;
-
-        case 'ping':
-          ws.send(JSON.stringify({ type: 'pong' }));
           break;
       }
     } catch (e) {
