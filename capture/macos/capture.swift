@@ -63,11 +63,18 @@ class H264Encoder {
         // Low-latency realtime encoding
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse) // no B-frames
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
         currentBitrate = bitrate * 1000
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber) // 1 IDR per second
+        // Force every frame to be output (don't skip frames when scene is static)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps / 2) as CFNumber) // IDR every 0.5s
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 0.5 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
+        // Prevent encoder from dropping to zero bitrate on static scenes
+        // DataRateLimits: [bytes per interval, interval in seconds]
+        let minBytesPerSec = max(bitrate * 1000 / 8, 10000) // at least 10KB/s
+        let limits: [Int] = [minBytesPerSec, 1]
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
 
         VTCompressionSessionPrepareToEncodeFrames(session)
         log("H264 encoder: \(width)x\(height) @ \(Int(fps))fps, \(bitrate)kbps")
