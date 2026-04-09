@@ -51,7 +51,20 @@ const MIME = {
   '.json': 'application/json',
 };
 
-const stream = createStream();
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    // Skip virtual/tunnel interfaces (VPN, Clash, etc.)
+    if (name.startsWith('utun') || name.startsWith('tun') || name.startsWith('tap') || name.startsWith('vir')) continue;
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+const localIP = getLocalIP();
+const stream = createStream({ bindAddress: localIP });
 
 const server = http.createServer((req, res) => {
   let filePath = path.join(__dirname, 'public', req.url === '/' ? 'index.html' : req.url);
@@ -136,22 +149,13 @@ wss.on('connection', (ws) => {
   });
 });
 
-function getLocalIP() {
-  const interfaces = os.networkInterfaces();
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
-    }
-  }
-  return '127.0.0.1';
-}
 
 mouse.ready.then(() => {
   server.listen(PORT, '0.0.0.0', () => {
-    const ip = getLocalIP();
     console.log(`\nRemote Mouse Control Server`);
     console.log(`Local:   http://localhost:${PORT}`);
-    console.log(`Network: http://${ip}:${PORT}`);
+    console.log(`Network: http://${localIP}:${PORT}`);
+    console.log(`WebRTC bind: ${localIP}`);
     console.log(`\nOpen the Network URL on your phone to start controlling.\n`);
   });
 });

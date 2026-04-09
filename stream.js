@@ -23,6 +23,7 @@ function getCaptureCommand() {
 
 function createStream(opts = {}) {
   const cfg = { ...DEFAULTS, ...opts };
+  const bindAddress = cfg.bindAddress || '0.0.0.0';
   let proc = null;
   let buf = Buffer.alloc(0);
   let screenSize = null;
@@ -97,7 +98,10 @@ function createStream(opts = {}) {
 
   // WebRTC signaling — server is offerer (has video track)
   function createPeer(ws) {
-    const pc = new ndc.PeerConnection('server', { iceServers: [] });
+    const pc = new ndc.PeerConnection('server', {
+      iceServers: [],
+      bindAddress: bindAddress,
+    });
 
     const video = new ndc.Video('video', 'sendonly');
     video.addH264Codec(96);
