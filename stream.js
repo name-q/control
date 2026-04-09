@@ -37,8 +37,9 @@ function createStream(opts = {}) {
   const readyPromise = new Promise(r => { readyResolve = r; });
   let latestCursor = null;
 
-  // WebRTC peers: Map<ws, { pc, track, sender }>
+  // WebRTC peers: Map<ws, { pc, track, dataChannel }>
   const peers = new Map();
+  const pendingIce = new Map(); // Buffer ICE candidates that arrive before offer is processed
 
   // H264 RTP state
   let seqNum = 0;
@@ -245,6 +246,16 @@ function createStream(opts = {}) {
 
     peers.set(ws, { pc, track, dataChannel: null });
 
+    // Flush any ICE candidates that arrived before the offer was processed
+    const buffered = pendingIce.get(ws);
+    if (buffered) {
+      for (const c of buffered) {
+        try { await pc.addIceCandidate(c); } catch {}
+      }
+      console.log('[stream] Flushed', buffered.length, 'buffered ICE candidates');
+      pendingIce.delete(ws);
+    }
+
     // Non-blocking: setLocalDescription triggers ICE gathering
     pc.setLocalDescription(answer).then(() => {
       console.log('[stream] setLocalDescription completed');
@@ -264,12 +275,17 @@ function createStream(opts = {}) {
   async function handleIce(ws, candidate) {
     const peer = peers.get(ws);
     if (peer) {
-      console.log('[stream] Adding ICE candidate:', candidate.candidate?.substring(0, 60));
+      console.log('[stream] Adding ICE candidate');
       try {
         await peer.pc.addIceCandidate(candidate);
       } catch (e) {
         console.error('[stream] ICE error:', e.message);
       }
+    } else {
+      // Buffer — offer not processed yet
+      if (!pendingIce.has(ws)) pendingIce.set(ws, []);
+      pendingIce.get(ws).push(candidate);
+      console.log('[stream] Buffered ICE candidate (offer pending)');
     }
   }
 

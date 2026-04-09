@@ -95,6 +95,9 @@ wss.on('connection', (ws) => {
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw);
+      if (msg.type !== 'move' && msg.type !== 'moveTo' && msg.type !== 'scroll') {
+        console.log('[server] msg:', msg.type);
+      }
       switch (msg.type) {
         // WebRTC signaling
         case 'offer': {
@@ -103,6 +106,7 @@ wss.on('connection', (ws) => {
           break;
         }
         case 'ice':
+          console.log('[server] ICE from browser:', JSON.stringify(msg.candidate).substring(0, 100));
           await stream.handleIce(ws, msg.candidate);
           break;
 
