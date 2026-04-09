@@ -197,6 +197,10 @@ class StreamOutput: NSObject, SCStreamOutput {
         super.init()
     }
 
+    var skipCount = 0
+    var encodeCount = 0
+    var lastStatTime: UInt64 = 0
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
@@ -204,12 +208,19 @@ class StreamOutput: NSObject, SCStreamOutput {
         let cursorLoc = CGEvent(source: nil)?.location ?? .zero
         stdoutHandle.write(Data("CURSOR:\(Int(cursorLoc.x)):\(Int(cursorLoc.y))\n".utf8))
 
-        // Skip unchanged frames (ScreenCaptureKit native dirty rects)
-        if !isDirty(sampleBuffer) { return }
+        // Skip unchanged frames
+        if !isDirty(sampleBuffer) { skipCount += 1 }
+        else {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            encoder.encode(pb, timestamp: pts)
+            encodeCount += 1
+        }
 
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        encoder.encode(pb, timestamp: pts)
-        frameCount += 1
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        if now - lastStatTime > 3000 {
+            log("encode=\(encodeCount) skip=\(skipCount)")
+            encodeCount = 0; skipCount = 0; lastStatTime = now
+        }
     }
 
     func isDirty(_ sb: CMSampleBuffer) -> Bool {

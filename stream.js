@@ -86,15 +86,24 @@ function createStream(opts = {}) {
     if (buf.length > 5 * 1024 * 1024) buf = Buffer.alloc(0);
   }
 
+  let sendCount = 0, dropCount = 0, lastLogTime = 0;
+
   function broadcastNALU(data) {
-    // Must copy — data is a subarray view that gets invalidated
     const copy = Buffer.from(data);
     for (const [, peer] of peers) {
       try {
         if (peer.track && peer.track.isOpen()) {
           peer.track.sendMessageBinary(copy);
+          sendCount++;
+        } else {
+          dropCount++;
         }
-      } catch {}
+      } catch { dropCount++; }
+    }
+    const now = Date.now();
+    if (now - lastLogTime > 3000 && peers.size > 0) {
+      console.log(`[stream] sent=${sendCount} dropped=${dropCount} trackOpen=${peers.size > 0 ? [...peers.values()][0]?.track?.isOpen() : 'N/A'}`);
+      sendCount = 0; dropCount = 0; lastLogTime = now;
     }
   }
 
