@@ -315,18 +315,23 @@ class H264Encoder {
         let props: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         if forceKeyframe { forceKeyframe = false }
 
+        let encodeStart = mach_absolute_time()
         VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
             duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
             guard status == noErr, let sb = sb, let self = self else { return }
+            // Track encode time
+            let encodeMs = machToSeconds(mach_absolute_time() - encodeStart) * 1000
+            self.lastEncodeTimeMs = encodeMs
+
             let annexB = self.buildAnnexB(sb)
             if !annexB.isEmpty {
-                // Push to scheduler slot (lock-free swap)
                 os_unfair_lock_lock(&self.slotLock)
                 self.frameSlot = annexB
                 os_unfair_lock_unlock(&self.slotLock)
             }
         }
     }
+    var lastEncodeTimeMs: Double = 0
 
     private func buildAnnexB(_ sb: CMSampleBuffer) -> Data {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sb) else { return Data() }
@@ -373,7 +378,8 @@ class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
     var frameCount: UInt64 = 0
     var lastEncodeTime: UInt64 = 0
-    let targetInterval: UInt64 // nanoseconds between frames
+    let targetInterval: UInt64
+    var slowFrameCount = 0 // consecutive frames where encode > 25ms
 
     init(encoder: H264Encoder, fps: Double) {
         self.encoder = encoder
@@ -388,12 +394,23 @@ class StreamOutput: NSObject, SCStreamOutput {
         let loc = CGEvent(source: nil)?.location ?? .zero
         output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
 
-        // Frame Scheduler: if REMB says bandwidth is low, skip frames to reduce load
+        // Frame Scheduler: skip if REMB says very low bandwidth
         let now = mach_absolute_time()
         if rembBitrate > 0 && rembBitrate < 500_000 {
-            // Very low bandwidth — drop to 15fps
             let minInterval = targetInterval * 2
             if now - lastEncodeTime < minInterval { return }
+        }
+
+        // Encode time protection: if encoder is too slow, signal Node to downgrade
+        if encoder.lastEncodeTimeMs > 25 {
+            slowFrameCount += 1
+            if slowFrameCount >= 10 {
+                // 10 consecutive slow frames — encoder can't keep up at this resolution
+                output("{\"type\":\"encodeSlow\",\"ms\":\(Int(encoder.lastEncodeTimeMs))}")
+                slowFrameCount = 0
+            }
+        } else {
+            slowFrameCount = 0
         }
 
         lastEncodeTime = now
@@ -477,8 +494,15 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H2
     case "quality":
         let kbps = obj["kbps"] as? Int ?? defaultBitrate
         let newScale = obj["scale"] as? Double ?? scale
-        let nw = Int(Double(display.width) * newScale)
-        let nh = Int(Double(display.height) * newScale)
+        var nw = Int(Double(display.width) * newScale)
+        var nh = Int(Double(display.height) * newScale)
+        // Cap at ~2MP (1920x1080 equivalent) — higher kills encoder performance
+        let maxPixels = 1920 * 1080
+        if nw * nh > maxPixels {
+            let ratio = sqrt(Double(maxPixels) / Double(nw * nh))
+            nw = Int(Double(nw) * ratio)
+            nh = Int(Double(nh) * ratio)
+        }
         // Update SCStream resolution
         let newCfg = SCStreamConfiguration()
         newCfg.width = nw; newCfg.height = nh

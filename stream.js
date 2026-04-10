@@ -62,8 +62,18 @@ function createStream(opts = {}) {
         try {
           const parsed = JSON.parse(line);
           if (parsed.type === 'dc' && parsed.data) {
-            // DataChannel input from browser → capture → stdout → here
             if (ws._onDcMessage) ws._onDcMessage(parsed.data);
+          } else if (parsed.type === 'encodeSlow') {
+            // Encoder can't keep up — auto-downgrade resolution
+            const currentScale = cfg.scale || 1;
+            if (currentScale > 0.5) {
+              const newScale = Math.max(currentScale * 0.75, 0.5);
+              const newBitrate = Math.max(Math.round(cfg.bitrate * 0.75), 2000);
+              console.log(`[stream] Encoder slow (${parsed.ms}ms) — downgrading: scale=${newScale} bitrate=${newBitrate}kbps`);
+              cfg.scale = newScale;
+              cfg.bitrate = newBitrate;
+              forwardToCapture(ws, { type: 'quality', kbps: newBitrate, scale: newScale });
+            }
           } else {
             ws.send(line);
           }
