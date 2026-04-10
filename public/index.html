@@ -138,6 +138,7 @@ let streamStarted = false;
 let showStats = false, fpsCurrent = 0;
 let latency = 0;
 let bwCurrent = 0;
+let lastPacketsLost = 0;
 
 // Bitrate presets (kbps)
 const BITRATE_PRESETS = [
@@ -186,10 +187,19 @@ function pollStats() {
       if (s.type === 'inbound-rtp' && s.kind === 'video') {
         const bytes = s.bytesReceived || 0;
         const frames = s.framesDecoded || 0;
+        const received = s.framesReceived || 0;
+        const dropped = s.framesDropped || 0;
+        const lost = s.packetsLost || 0;
+        const jitter = s.jitter || 0;
+        lastPacketsLost = lost;
         bwCurrent = Math.round((bytes - lastStatsBytes) / elapsed);
         fpsCurrent = Math.round((frames - lastStatsFrames) / elapsed);
         lastStatsBytes = bytes;
         lastStatsFrames = frames;
+        // Log detailed stats for debugging
+        if (showStats) {
+          console.log(`recv=${received} dec=${frames} drop=${dropped} lost=${lost} jitter=${jitter.toFixed(3)}`);
+        }
       }
       if (s.type === 'candidate-pair' && s.state === 'succeeded') {
         latency = Math.round(s.currentRoundTripTime * 1000) || latency;
@@ -197,7 +207,8 @@ function pollStats() {
     });
     lastStatsTime = now;
     if (showStats) {
-      statusEl.textContent = `${fpsCurrent} FPS · ${formatLatency(latency)} · ${formatBW(bwCurrent)}`;
+      const lostInfo = lastPacketsLost > 0 ? ` · L:${lastPacketsLost}` : '';
+      statusEl.textContent = `${fpsCurrent} FPS · ${formatLatency(latency)} · ${formatBW(bwCurrent)}${lostInfo}`;
     }
   }).catch(() => {});
   setTimeout(pollStats, 1000);
