@@ -181,12 +181,14 @@ class H264Encoder {
     var webrtc: WebRTCManager?
     var lastRembApplied: Int = 0
 
-    // Frame Scheduler: clock-driven send
-    private var latestFrame: Data?
-    private let frameLock = NSLock()
+    // Frame Scheduler: lock-free single-slot buffer
+    // Encoder writes, scheduler reads. Atomic swap via os_unfair_lock (fastest on macOS)
+    private var frameSlot: Data?
+    private var slotLock = os_unfair_lock()
     private var rtpTimestamp: UInt32 = 0
-    private let rtpStep: UInt32 // 90kHz / fps
+    private let rtpStep: UInt32
     private var schedulerTimer: DispatchSourceTimer?
+    private var consecutiveEmpty = 0 // track idle ticks
 
     init(width: Int, height: Int, fps: Double, bitrate: Int) {
         self.rtpStep = UInt32(90000 / fps)
@@ -208,20 +210,29 @@ class H264Encoder {
         VTCompressionSessionPrepareToEncodeFrames(session)
         log("H264 encoder: \(width)x\(height) @ \(Int(fps))fps, \(bitrate)kbps")
 
-        // Start frame scheduler — fixed interval send clock
+        // Frame Scheduler — strict clock-driven send
         let intervalNs = UInt64(1_000_000_000 / fps)
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "scheduler", qos: .userInteractive))
-        timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(intervalNs)))
+        timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(intervalNs)), leeway: .nanoseconds(0))
         timer.setEventHandler { [weak self] in
             guard let self = self, let webrtc = self.webrtc else { return }
-            self.frameLock.lock()
-            let frame = self.latestFrame
-            self.latestFrame = nil
-            self.frameLock.unlock()
+
+            // Atomic swap: grab frame, clear slot
+            os_unfair_lock_lock(&self.slotLock)
+            let frame = self.frameSlot
+            self.frameSlot = nil
+            os_unfair_lock_unlock(&self.slotLock)
 
             if let frame = frame {
+                self.consecutiveEmpty = 0
                 webrtc.sendH264(frame, timestamp: self.rtpTimestamp)
                 self.rtpTimestamp &+= self.rtpStep
+            } else {
+                self.consecutiveEmpty += 1
+                // Still increment timestamp to keep clock steady
+                if self.consecutiveEmpty < 3 {
+                    self.rtpTimestamp &+= self.rtpStep
+                }
             }
         }
         timer.resume()
@@ -267,10 +278,10 @@ class H264Encoder {
             guard status == noErr, let sb = sb, let self = self else { return }
             let annexB = self.buildAnnexB(sb)
             if !annexB.isEmpty {
-                // Push to scheduler queue — timer will send at fixed interval
-                self.frameLock.lock()
-                self.latestFrame = annexB
-                self.frameLock.unlock()
+                // Push to scheduler slot (lock-free swap)
+                os_unfair_lock_lock(&self.slotLock)
+                self.frameSlot = annexB
+                os_unfair_lock_unlock(&self.slotLock)
             }
         }
     }
