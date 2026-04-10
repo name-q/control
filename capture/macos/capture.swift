@@ -223,8 +223,8 @@ class H264Encoder {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
     }
 
-    func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
-        guard let s = session else { return }
+    func encode(_ pb: CVPixelBuffer, timestamp: CMTime, completion: (() -> Void)? = nil) {
+        guard let s = session else { completion?(); return }
 
         // PLI response — immediate IDR
         if pliReceived {
@@ -286,10 +286,10 @@ class H264Encoder {
 
             let annexB = self.buildAnnexB(sb)
             if !annexB.isEmpty, let webrtc = self.webrtc {
-                // Direct send — no intermediate buffer, no second timer
                 webrtc.sendH264(annexB, timestamp: self.rtpTimestamp)
                 self.rtpTimestamp &+= self.rtpStep
             }
+            completion?()
         }
     }
 
@@ -336,67 +336,27 @@ extension CMSampleBuffer {
 // ========== Stream Output + Frame Arbitration ==========
 class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
-
-    // Frame Arbitration: only keep the latest pixel buffer
-    // Capture writes, encoder reads. Never queue, never backlog.
-    private var latestPixelBuffer: CVPixelBuffer?
-    private var latestPTS: CMTime = .zero
-    private var pbLock = os_unfair_lock()
-    private var encodeTimer: DispatchSourceTimer?
-    private let encodeFps: Double
+    private var encoding = false
 
     init(encoder: H264Encoder, fps: Double) {
         self.encoder = encoder
-        self.encodeFps = fps
         super.init()
-        startEncodeLoop()
-    }
-
-    // Encode loop: fixed interval, always takes latest frame only
-    func startEncodeLoop() {
-        encodeTimer?.cancel()
-        let interval = UInt64(1_000_000_000 / encodeFps)
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "encode", qos: .userInteractive))
-        timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(interval)), leeway: .nanoseconds(0))
-        timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            // Grab latest frame, clear slot
-            os_unfair_lock_lock(&self.pbLock)
-            let pb = self.latestPixelBuffer
-            let pts = self.latestPTS
-            self.latestPixelBuffer = nil
-            os_unfair_lock_unlock(&self.pbLock)
-
-            if let pb = pb {
-                self.encoder.encode(pb, timestamp: pts)
-            }
-        }
-        timer.resume()
-        encodeTimer = timer
-    }
-
-    func stopEncodeLoop() {
-        encodeTimer?.cancel()
-        encodeTimer = nil
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
 
-        // Cursor (always send, never blocked)
         let loc = CGEvent(source: nil)?.location ?? .zero
         output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
 
-        // Frame Arbitration: just store latest, never call encode directly
+        // Frame Arbitration: if encoder is busy, skip (latest wins next callback)
+        // If free, encode immediately (preserves temporal coherence with capture)
+        guard !encoding else { return }
+        encoding = true
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        os_unfair_lock_lock(&pbLock)
-        latestPixelBuffer = pb
-        latestPTS = pts
-        os_unfair_lock_unlock(&pbLock)
-    }
-
-    deinit {
-        stopEncodeLoop()
+        encoder.encode(pb, timestamp: pts) { [weak self] in
+            self?.encoding = false
+        }
     }
 }
 // ========== Start Capture ==========
@@ -477,8 +437,8 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H2
         let newScale = obj["scale"] as? Double ?? scale
         var nw = Int(Double(display.width) * newScale)
         var nh = Int(Double(display.height) * newScale)
-        // Cap at ~2MP (1920x1080 equivalent) — higher kills encoder performance
-        let maxPixels = 1920 * 1080
+        // Cap at ~4MP (2560x1440 equivalent)
+        let maxPixels = 2560 * 1440
         if nw * nh > maxPixels {
             let ratio = sqrt(Double(maxPixels) / Double(nw * nh))
             nw = Int(Double(nw) * ratio)
@@ -490,13 +450,11 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H2
         newCfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         newCfg.queueDepth = 3; newCfg.pixelFormat = kCVPixelFormatType_32BGRA; newCfg.showsCursor = false
         Task { try? await stream.updateConfiguration(newCfg) }
-        // Rebuild encoder with new dimensions + bitrate
-        streamOutput.stopEncodeLoop() // stop old encode timer
+        // Rebuild encoder
         let newEncoder = H264Encoder(width: nw, height: nh, fps: fps, bitrate: kbps)
         newEncoder.webrtc = encoder.webrtc
         encoder = newEncoder
         streamOutput.encoder = newEncoder
-        streamOutput.startEncodeLoop() // restart with new encoder
         log("[stdin] Quality: \(nw)x\(nh) \(kbps)kbps")
     default: break
     }
