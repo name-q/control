@@ -13,7 +13,7 @@ import VideoToolbox
 
 let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 60 : 60
 let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 1 : 1
-let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 8000 : 8000
+let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 15000 : 15000
 let bindAddr = CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : nil
 
 let stdoutH = FileHandle.standardOutput
