@@ -236,11 +236,12 @@ class H264Encoder {
         VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
             duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
             guard status == noErr, let sb = sb, let self = self, let webrtc = self.webrtc else { return }
-            // Build Annex-B data synchronously (CMSampleBuffer may be recycled after callback returns)
+            // Build Annex-B synchronously (CMSampleBuffer recycled after callback)
             let annexB = self.buildAnnexB(sb)
             if !annexB.isEmpty {
-                // Send on dedicated queue to not block encoder
-                self.sendQueue.async { webrtc.sendH264(annexB) }
+                // Send directly — encode callback is already on a dedicated queue
+                // No async dispatch = no scheduling delay
+                webrtc.sendH264(annexB)
             }
         }
     }
