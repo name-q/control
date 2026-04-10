@@ -401,14 +401,10 @@ class StreamOutput: NSObject, SCStreamOutput {
             if now - lastEncodeTime < minInterval { return }
         }
 
-        // Encode time protection: if encoder is too slow, signal Node to downgrade
+        // Encode time protection: log slow frames but don't auto-degrade
+        // (user's quality choice should be respected)
         if encoder.lastEncodeTimeMs > 25 {
             slowFrameCount += 1
-            if slowFrameCount >= 10 {
-                // 10 consecutive slow frames — encoder can't keep up at this resolution
-                output("{\"type\":\"encodeSlow\",\"ms\":\(Int(encoder.lastEncodeTimeMs))}")
-                slowFrameCount = 0
-            }
         } else {
             slowFrameCount = 0
         }
