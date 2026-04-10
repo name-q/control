@@ -3,7 +3,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const DEFAULTS = { fps: 30, scale: 1, bitrate: 8000 };
+const DEFAULTS = { fps: 60, scale: 1, bitrate: 8000 };
 
 function getCaptureCommand() {
   const platform = os.platform();
