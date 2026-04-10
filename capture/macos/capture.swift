@@ -223,8 +223,8 @@ class H264Encoder {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
     }
 
-    func encode(_ pb: CVPixelBuffer, timestamp: CMTime, completion: (() -> Void)? = nil) {
-        guard let s = session else { completion?(); return }
+    func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
+        guard let s = session else { return }
 
         // PLI response — immediate IDR
         if pliReceived {
@@ -289,7 +289,6 @@ class H264Encoder {
                 webrtc.sendH264(annexB, timestamp: self.rtpTimestamp)
                 self.rtpTimestamp &+= self.rtpStep
             }
-            completion?()
         }
     }
 
@@ -336,28 +335,62 @@ extension CMSampleBuffer {
 // ========== Stream Output + Frame Arbitration ==========
 class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
-    private var encoding = false
+    // 1-slot frame buffer: capture overwrites, encode clock reads
+    private var latestPB: CVPixelBuffer?
+    private var latestPTS: CMTime = .zero
+    private var slotLock = os_unfair_lock()
+    private var encodeTimer: DispatchSourceTimer?
 
     init(encoder: H264Encoder, fps: Double) {
         self.encoder = encoder
         super.init()
+        startClock(fps: fps)
+    }
+
+    func startClock(fps: Double) {
+        encodeTimer?.cancel()
+        let interval = UInt64(1_000_000_000 / fps)
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "encode-clock", qos: .userInteractive))
+        timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(interval)), leeway: .nanoseconds(0))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            // Take latest frame from slot
+            os_unfair_lock_lock(&self.slotLock)
+            let pb = self.latestPB
+            let pts = self.latestPTS
+            self.latestPB = nil // consumed
+            os_unfair_lock_unlock(&self.slotLock)
+
+            // Encode + send directly in this callback (single path, no second timer)
+            if let pb = pb {
+                self.encoder.encode(pb, timestamp: pts)
+            }
+        }
+        timer.resume()
+        encodeTimer = timer
+    }
+
+    func stopClock() {
+        encodeTimer?.cancel()
+        encodeTimer = nil
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
 
+        // Cursor (always, never blocked)
         let loc = CGEvent(source: nil)?.location ?? .zero
         output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
 
-        // Frame Arbitration: if encoder is busy, skip (latest wins next callback)
-        // If free, encode immediately (preserves temporal coherence with capture)
-        guard !encoding else { return }
-        encoding = true
+        // 1-slot overwrite: capture never waits, never queues
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        encoder.encode(pb, timestamp: pts) { [weak self] in
-            self?.encoding = false
-        }
+        os_unfair_lock_lock(&slotLock)
+        latestPB = pb
+        latestPTS = pts
+        os_unfair_lock_unlock(&slotLock)
     }
+
+    deinit { stopClock() }
 }
 // ========== Start Capture ==========
 func startCapture() async throws {
@@ -450,11 +483,13 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H2
         newCfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         newCfg.queueDepth = 3; newCfg.pixelFormat = kCVPixelFormatType_32BGRA; newCfg.showsCursor = false
         Task { try? await stream.updateConfiguration(newCfg) }
-        // Rebuild encoder
+        // Rebuild encoder — stop clock, swap, restart
+        streamOutput.stopClock()
         let newEncoder = H264Encoder(width: nw, height: nh, fps: fps, bitrate: kbps)
         newEncoder.webrtc = encoder.webrtc
         encoder = newEncoder
         streamOutput.encoder = newEncoder
+        streamOutput.startClock(fps: fps)
         log("[stdin] Quality: \(nw)x\(nh) \(kbps)kbps")
     default: break
     }
