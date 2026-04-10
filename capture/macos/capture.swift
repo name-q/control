@@ -267,24 +267,20 @@ class H264Encoder {
             pliWindowStart = now
         }
 
-        // REMB-driven bitrate control: fast down, slow up
-        if rembBitrate > 0 {
+        // REMB: only lower bitrate when there's actual packet loss (PLI)
+        // On LAN, REMB is conservative (~4Mbps) but real capacity is much higher
+        // Don't let REMB override user's quality choice unless network is actually failing
+        if rembBitrate > 0 && pliWindowCount > 0 {
             let remb = Int(rembBitrate)
-            let currentBitrate = lastRembApplied > 0 ? lastRembApplied : defaultBitrate * 1000
-            var targetBps = currentBitrate
-
-            if remb < currentBitrate {
-                // Network congested — drop fast (85% of REMB)
-                targetBps = max(Int(Double(remb) * 0.85), 1_000_000)
-            } else if pliWindowCount == 0 {
-                // Stable — recover slowly (10% increase)
-                targetBps = min(Int(Double(currentBitrate) * 1.1), defaultBitrate * 1000)
-            }
-
-            if abs(targetBps - lastRembApplied) > 200_000 {
+            let targetBps = max(Int(Double(remb) * 0.85), 1_000_000)
+            if targetBps < lastRembApplied || lastRembApplied == 0 {
                 lastRembApplied = targetBps
                 VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBps as CFNumber)
             }
+        } else if pliWindowCount == 0 && lastRembApplied > 0 && lastRembApplied < defaultBitrate * 1000 {
+            // No loss — restore user's chosen bitrate
+            lastRembApplied = defaultBitrate * 1000
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: lastRembApplied as CFNumber)
         }
 
         var flags: VTEncodeInfoFlags = []
@@ -355,15 +351,6 @@ class StreamOutput: NSObject, SCStreamOutput {
     private var slotLock = os_unfair_lock()
     private var encodeTimer: DispatchSourceTimer?
 
-    // Pre-sharpen: compensate for H264 4:2:0 chroma smearing on text/UI edges
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    private let sharpenFilter: CIFilter = {
-        let f = CIFilter(name: "CIUnsharpMask")!
-        f.setValue(0.5, forKey: kCIInputRadiusKey)    // small radius = edge-only
-        f.setValue(0.4, forKey: kCIInputIntensityKey)  // light touch — just enough to counter 420 blur
-        return f
-    }()
-
     init(encoder: H264Encoder, fps: Double) {
         self.encoder = encoder
         super.init()
@@ -386,9 +373,7 @@ class StreamOutput: NSObject, SCStreamOutput {
 
             // Encode + send directly in this callback
             if let pb = pb {
-                // Pre-sharpen: light unsharp mask to counter 4:2:0 chroma blur on text edges
-                let sharpened = self.presharpen(pb)
-                self.encoder.encode(sharpened ?? pb, timestamp: pts)
+                self.encoder.encode(pb, timestamp: pts)
             }
         }
         timer.resume()
@@ -416,17 +401,6 @@ class StreamOutput: NSObject, SCStreamOutput {
     }
 
     deinit { stopClock() }
-
-    // Light pre-sharpen: renders into a new CVPixelBuffer with unsharp mask applied
-    // Returns nil if sharpen fails (caller uses original)
-    private func presharpen(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
-        let ciImage = CIImage(cvPixelBuffer: pb)
-        sharpenFilter.setValue(ciImage, forKey: kCIInputImageKey)
-        guard let output = sharpenFilter.outputImage else { return nil }
-        // Render back into the same pixel buffer (in-place, zero alloc)
-        ciContext.render(output, to: pb)
-        return pb
-    }
 }
 // ========== Start Capture ==========
 func startCapture() async throws {
