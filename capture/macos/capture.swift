@@ -18,8 +18,18 @@ let bindAddr = CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : nil
 
 let stdoutH = FileHandle.standardOutput
 let stderrH = FileHandle.standardError
-var pliReceived = false    // PLI flag — encoder checks this each frame
-var rembBitrate: UInt32 = 0 // REMB — browser-reported available bandwidth
+var pliReceived = false
+var rembBitrate: UInt32 = 0
+var pliCount: Int = 0
+var pliWindowCount: Int = 0
+var pliWindowStart: UInt64 = 0
+
+// Mach timebase for mach_absolute_time → nanoseconds
+private var _machInfo = mach_timebase_info_data_t()
+private let _ : Void = { mach_timebase_info(&_machInfo) }()
+func machToSeconds(_ t: UInt64) -> Double {
+    return Double(t) * Double(_machInfo.numer) / Double(_machInfo.denom) / 1_000_000_000.0
+}
 func log(_ msg: String) { stderrH.write(Data((msg + "\n").utf8)) }
 func output(_ msg: String) { stdoutH.write(Data((msg + "\n").utf8)) }
 
@@ -118,10 +128,11 @@ class WebRTCManager {
         // 2. NACK Responder — auto-retransmit lost packets
         rtcChainRtcpNackResponder(trackId, 512)
 
-        // 3. PLI Handler — browser requests keyframe on packet loss
+        // 3. PLI Handler — browser detected decode failure
         rtcChainPliHandler(trackId) { tr, ptr in
-            log("[webrtc] PLI → forcing IDR")
             pliReceived = true
+            pliCount += 1
+            pliWindowCount += 1
         }
 
         // 5. REMB Handler — browser reports available bandwidth
@@ -247,20 +258,33 @@ class H264Encoder {
     func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
         guard let s = session else { return }
 
-        // Check PLI flag — browser lost packets, needs IDR immediately
+        // PLI response — immediate IDR
         if pliReceived {
             pliReceived = false
             forceKeyframe = true
-            // After PLI, shorten GOP temporarily for faster recovery
-            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps / 2) as CFNumber)
-            // Schedule GOP restore after 3 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let s = self?.session else { return }
-                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
-            }
         }
 
-        // Check REMB — browser reports available bandwidth, adapt bitrate
+        // Dynamic GOP based on PLI frequency (5-second window)
+        let now = mach_absolute_time()
+        if pliWindowStart == 0 { pliWindowStart = now }
+        let elapsed = machToSeconds(now - pliWindowStart)
+        if elapsed > 5.0 {
+            // Adjust GOP based on PLI rate in last 5 seconds
+            if pliWindowCount >= 5 {
+                // Heavy packet loss — very short GOP (IDR every 0.25s)
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: max(Int(fps / 4), 2) as CFNumber)
+            } else if pliWindowCount >= 2 {
+                // Moderate loss — shorter GOP (IDR every 0.5s)
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps / 2) as CFNumber)
+            } else {
+                // Stable — normal GOP (IDR every 1s)
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
+            }
+            pliWindowCount = 0
+            pliWindowStart = now
+        }
+
+        // REMB — adapt bitrate to available bandwidth
         if rembBitrate > 0 {
             let newBps = Int(rembBitrate)
             if newBps != lastRembApplied {
