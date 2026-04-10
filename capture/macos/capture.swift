@@ -212,6 +212,18 @@ class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
+
+        // Color space: BT.709 + Full Range — critical for screen content
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries, value: kCMFormatDescriptionColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction, value: kCMFormatDescriptionTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2)
+
+        // Pixel transfer: high quality RGB→YUV conversion (reduces chroma smearing on text)
+        let ptProps: [String: Any] = [
+            kVTPixelTransferPropertyKey_ScalingMode as String: kVTScalingMode_CropSourceToCleanAperture,
+            kVTPixelTransferPropertyKey_DownsamplingMode as String: "Average",
+        ]
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PixelTransferProperties, value: ptProps as CFDictionary)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: 0.95 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
