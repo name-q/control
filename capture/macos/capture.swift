@@ -215,9 +215,6 @@ class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
-        // Allow 2x burst but no more — prevents WiFi congestion while keeping quality
-        let maxBytesPerSec = bitrate * 1000 / 8 * 2
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [maxBytesPerSec, 1] as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1.0 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
@@ -256,7 +253,6 @@ class H264Encoder {
     func setBitrate(_ bps: Int) {
         guard let s = session else { return }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [bps / 8 * 2, 1] as CFArray)
     }
 
     func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
@@ -305,9 +301,6 @@ class H264Encoder {
             if abs(targetBps - lastRembApplied) > 200_000 {
                 lastRembApplied = targetBps
                 VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBps as CFNumber)
-                // Update burst limit too
-                let maxBytes = targetBps / 8 * 2
-                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [maxBytes, 1] as CFArray)
             }
         }
 
