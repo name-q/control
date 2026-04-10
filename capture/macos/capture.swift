@@ -366,45 +366,70 @@ extension CMSampleBuffer {
         return !(f[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
     }
 }
-// ========== Stream Output + Frame Scheduler ==========
+// ========== Stream Output + Frame Arbitration ==========
 class StreamOutput: NSObject, SCStreamOutput {
     var encoder: H264Encoder
-    var frameCount: UInt64 = 0
-    var lastEncodeTime: UInt64 = 0
-    let targetInterval: UInt64
-    var slowFrameCount = 0 // consecutive frames where encode > 25ms
+
+    // Frame Arbitration: only keep the latest pixel buffer
+    // Capture writes, encoder reads. Never queue, never backlog.
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestPTS: CMTime = .zero
+    private var pbLock = os_unfair_lock()
+    private var encodeTimer: DispatchSourceTimer?
+    private let encodeFps: Double
 
     init(encoder: H264Encoder, fps: Double) {
         self.encoder = encoder
-        self.targetInterval = UInt64(1_000_000_000 / fps)
+        self.encodeFps = fps
         super.init()
+        startEncodeLoop()
+    }
+
+    // Encode loop: fixed interval, always takes latest frame only
+    func startEncodeLoop() {
+        encodeTimer?.cancel()
+        let interval = UInt64(1_000_000_000 / encodeFps)
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "encode", qos: .userInteractive))
+        timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(interval)), leeway: .nanoseconds(0))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            // Grab latest frame, clear slot
+            os_unfair_lock_lock(&self.pbLock)
+            let pb = self.latestPixelBuffer
+            let pts = self.latestPTS
+            self.latestPixelBuffer = nil
+            os_unfair_lock_unlock(&self.pbLock)
+
+            if let pb = pb {
+                self.encoder.encode(pb, timestamp: pts)
+            }
+        }
+        timer.resume()
+        encodeTimer = timer
+    }
+
+    func stopEncodeLoop() {
+        encodeTimer?.cancel()
+        encodeTimer = nil
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
 
-        // Cursor (always send)
+        // Cursor (always send, never blocked)
         let loc = CGEvent(source: nil)?.location ?? .zero
         output("CURSOR:\(Int(loc.x)):\(Int(loc.y))")
 
-        // Frame Scheduler: skip if REMB says very low bandwidth
-        let now = mach_absolute_time()
-        if rembBitrate > 0 && rembBitrate < 500_000 {
-            let minInterval = targetInterval * 2
-            if now - lastEncodeTime < minInterval { return }
-        }
+        // Frame Arbitration: just store latest, never call encode directly
+        let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+        os_unfair_lock_lock(&pbLock)
+        latestPixelBuffer = pb
+        latestPTS = pts
+        os_unfair_lock_unlock(&pbLock)
+    }
 
-        // Encode time protection: log slow frames but don't auto-degrade
-        // (user's quality choice should be respected)
-        if encoder.lastEncodeTimeMs > 25 {
-            slowFrameCount += 1
-        } else {
-            slowFrameCount = 0
-        }
-
-        lastEncodeTime = now
-        encoder.encode(pb, timestamp: CMSampleBufferGetPresentationTimeStamp(sb))
-        frameCount += 1
+    deinit {
+        stopEncodeLoop()
     }
 }
 // ========== Start Capture ==========
@@ -499,11 +524,12 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H2
         newCfg.queueDepth = 3; newCfg.pixelFormat = kCVPixelFormatType_32BGRA; newCfg.showsCursor = false
         Task { try? await stream.updateConfiguration(newCfg) }
         // Rebuild encoder with new dimensions + bitrate
+        streamOutput.stopEncodeLoop() // stop old encode timer
         let newEncoder = H264Encoder(width: nw, height: nh, fps: fps, bitrate: kbps)
         newEncoder.webrtc = encoder.webrtc
         encoder = newEncoder
-        // Update StreamOutput reference
         streamOutput.encoder = newEncoder
+        streamOutput.startEncodeLoop() // restart with new encoder
         log("[stdin] Quality: \(nw)x\(nh) \(kbps)kbps")
     default: break
     }
