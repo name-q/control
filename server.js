@@ -191,6 +191,12 @@ wss.on('connection', (ws) => {
           stream.forwardToCapture(ws, { type: 'quality', kbps: msg.data.kbps, scale: msg.data.scale });
           break;
 
+        case 'stats': {
+          const d = msg.data;
+          console.log(`[stats] fps=${d.fps} recv=${d.recv} dec=${d.dec} drop=${d.drop} lost=${d.lost} jitter=${d.jitter} bw=${Math.round(d.bw/1024)}KB/s`);
+          break;
+        }
+
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
           break;

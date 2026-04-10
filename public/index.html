@@ -196,9 +196,9 @@ function pollStats() {
         fpsCurrent = Math.round((frames - lastStatsFrames) / elapsed);
         lastStatsBytes = bytes;
         lastStatsFrames = frames;
-        // Log detailed stats for debugging
-        if (showStats) {
-          console.log(`recv=${received} dec=${frames} drop=${dropped} lost=${lost} jitter=${jitter.toFixed(3)}`);
+        // Send stats to server for logging
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'stats', data: { recv: received, dec: frames, drop: dropped, lost, jitter: +jitter.toFixed(3), fps: fpsCurrent, bw: bwCurrent } }));
         }
       }
       if (s.type === 'candidate-pair' && s.state === 'succeeded') {
