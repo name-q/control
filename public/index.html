@@ -143,12 +143,12 @@ let prevPacketsLost = 0;
 
 // Bitrate presets (kbps)
 const BITRATE_PRESETS = [
-  { label: 'SD',  kbps: 5000, scale: 0.5 },
-  { label: 'HD',  kbps: 10000, scale: 0.75 },
-  { label: 'FHD', kbps: 15000, scale: 1 },
+  { label: 'SD',  kbps: 5000, scale: 0.75 },
+  { label: 'HD',  kbps: 10000, scale: 1 },
+  { label: 'FHD', kbps: 15000, scale: 1.5 },
   { label: 'UHD', kbps: 40000, scale: 2 },
 ];
-let bitrateIdx = 2; // default FHD
+let bitrateIdx = 1; // default HD (1x native)
 const qualityBadge = document.getElementById('qualityBadge');
 qualityBadge.textContent = BITRATE_PRESETS[bitrateIdx].label;
 
