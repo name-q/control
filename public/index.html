@@ -139,6 +139,7 @@ let showStats = false, fpsCurrent = 0;
 let latency = 0;
 let bwCurrent = 0;
 let lastPacketsLost = 0;
+let prevPacketsLost = 0;
 
 // Bitrate presets (kbps)
 const BITRATE_PRESETS = [
@@ -191,7 +192,8 @@ function pollStats() {
         const dropped = s.framesDropped || 0;
         const lost = s.packetsLost || 0;
         const jitter = s.jitter || 0;
-        lastPacketsLost = lost;
+        lastPacketsLost = lost - prevPacketsLost; // delta, not cumulative
+        prevPacketsLost = lost;
         bwCurrent = Math.round((bytes - lastStatsBytes) / elapsed);
         fpsCurrent = Math.round((frames - lastStatsFrames) / elapsed);
         lastStatsBytes = bytes;
