@@ -13,7 +13,7 @@ import VideoToolbox
 
 let fps = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) ?? 30 : 30
 let scale = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 1 : 1
-let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 3000 : 3000
+let defaultBitrate = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) ?? 8000 : 8000
 let bindAddr = CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : nil
 
 let stdoutH = FileHandle.standardOutput
@@ -212,13 +212,12 @@ class H264Encoder {
         self.session = session
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (bitrate * 1000) as CFNumber)
-        // Hard cap: 1.5x average bitrate per second — prevents burst overwhelming WiFi
-        let maxBytesPerSec = bitrate * 1000 / 8 * 3 / 2
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
-            value: [maxBytesPerSec, 1] as CFArray)
+        // Allow 2x burst but no more — prevents WiFi congestion while keeping quality
+        let maxBytesPerSec = bitrate * 1000 / 8 * 2
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [maxBytesPerSec, 1] as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int(fps) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1.0 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
@@ -257,8 +256,7 @@ class H264Encoder {
     func setBitrate(_ bps: Int) {
         guard let s = session else { return }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-        let maxBytesPerSec = bps / 8 * 3 / 2
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [maxBytesPerSec, 1] as CFArray)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [bps / 8 * 2, 1] as CFArray)
     }
 
     func encode(_ pb: CVPixelBuffer, timestamp: CMTime) {
@@ -290,12 +288,26 @@ class H264Encoder {
             pliWindowStart = now
         }
 
-        // REMB — adapt bitrate to available bandwidth
+        // REMB-driven bitrate control: fast down, slow up
         if rembBitrate > 0 {
-            let newBps = Int(rembBitrate)
-            if newBps != lastRembApplied {
-                lastRembApplied = newBps
-                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: newBps as CFNumber)
+            let remb = Int(rembBitrate)
+            let currentBitrate = lastRembApplied > 0 ? lastRembApplied : defaultBitrate * 1000
+            var targetBps = currentBitrate
+
+            if remb < currentBitrate {
+                // Network congested — drop fast (85% of REMB)
+                targetBps = max(Int(Double(remb) * 0.85), 1_000_000)
+            } else if pliWindowCount == 0 {
+                // Stable — recover slowly (10% increase)
+                targetBps = min(Int(Double(currentBitrate) * 1.1), defaultBitrate * 1000)
+            }
+
+            if abs(targetBps - lastRembApplied) > 200_000 {
+                lastRembApplied = targetBps
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBps as CFNumber)
+                // Update burst limit too
+                let maxBytes = targetBps / 8 * 2
+                VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [maxBytes, 1] as CFArray)
             }
         }
 
