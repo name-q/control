@@ -236,17 +236,21 @@ class H264Encoder {
         VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
             duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
             guard status == noErr, let sb = sb, let self = self, let webrtc = self.webrtc else { return }
-            self.sendQueue.async { self.sendToWebRTC(sb, webrtc: webrtc) }
+            // Build Annex-B data synchronously (CMSampleBuffer may be recycled after callback returns)
+            let annexB = self.buildAnnexB(sb)
+            if !annexB.isEmpty {
+                // Send on dedicated queue to not block encoder
+                self.sendQueue.async { webrtc.sendH264(annexB) }
+            }
         }
     }
     var lastRembApplied: Int = 0
 
-    private func sendToWebRTC(_ sb: CMSampleBuffer, webrtc: WebRTCManager) {
-        guard let dataBuffer = CMSampleBufferGetDataBuffer(sb) else { return }
+    private func buildAnnexB(_ sb: CMSampleBuffer) -> Data {
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sb) else { return Data() }
         let isKey = sb.isKeyFrame
         var annexB = Data()
 
-        // SPS/PPS for keyframes
         if isKey, let fmt = CMSampleBufferGetFormatDescription(sb) {
             var spsPtr: UnsafePointer<UInt8>?; var spsSize = 0
             if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(fmt, parameterSetIndex: 0,
@@ -260,18 +264,17 @@ class H264Encoder {
             }
         }
 
-        // AVCC → Annex-B
         var totalLen = 0; var dataPtr: UnsafeMutablePointer<Int8>?
         CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLen, dataPointerOut: &dataPtr)
-        guard let ptr = dataPtr else { return }
+        guard let ptr = dataPtr else { return annexB }
+        // Pre-allocate to avoid repeated reallocation
+        annexB.reserveCapacity(annexB.count + totalLen + 32)
         var offset = 0
         while offset < totalLen {
             var naluLen: UInt32 = 0; memcpy(&naluLen, ptr + offset, 4); naluLen = naluLen.bigEndian; offset += 4
             annexB.append(contentsOf: [0,0,0,1]); annexB.append(Data(bytes: ptr + offset, count: Int(naluLen))); offset += Int(naluLen)
         }
-
-        // Send directly to WebRTC — zero pipe, zero Node, zero copy
-        webrtc.sendH264(annexB)
+        return annexB
     }
 }
 
