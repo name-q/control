@@ -315,12 +315,6 @@ class H264Encoder {
             annexB.append(contentsOf: [0,0,0,1]); annexB.append(Data(bytes: ptr + offset, count: Int(naluLen))); offset += Int(naluLen)
         }
 
-        // Large P-frame = lots of screen change = high packet loss risk
-        // Preemptively force next frame as IDR for faster recovery
-        if !isKey && annexB.count > 40_000 {
-            forceKeyframe = true
-        }
-
         return annexB
     }
 }
