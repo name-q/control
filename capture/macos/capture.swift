@@ -156,8 +156,10 @@ class WebRTCManager {
         }
     }
 
-    func sendH264(_ data: Data) {
+    func sendH264(_ data: Data, timestamp: UInt32) {
         guard trackId >= 0 else { return }
+        // Set RTP timestamp for this frame (90kHz clock)
+        rtcSetTrackRtpTimestamp(trackId, timestamp)
         data.withUnsafeBytes { ptr in
             guard let base = ptr.baseAddress else { return }
             rtcSendMessage(trackId, base.assumingMemoryBound(to: CChar.self), Int32(data.count))
@@ -177,9 +179,17 @@ class H264Encoder {
     var session: VTCompressionSession?
     var forceKeyframe = false
     var webrtc: WebRTCManager?
-    let sendQueue = DispatchQueue(label: "rtc.send", qos: .userInteractive)
+    var lastRembApplied: Int = 0
+
+    // Frame Scheduler: clock-driven send
+    private var latestFrame: Data?
+    private let frameLock = NSLock()
+    private var rtpTimestamp: UInt32 = 0
+    private let rtpStep: UInt32 // 90kHz / fps
+    private var schedulerTimer: DispatchSourceTimer?
 
     init(width: Int, height: Int, fps: Double, bitrate: Int) {
+        self.rtpStep = UInt32(90000 / fps)
         var s: VTCompressionSession?
         VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
             codecType: kCMVideoCodecType_H264, encoderSpecification: nil,
@@ -197,6 +207,25 @@ class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(session)
         log("H264 encoder: \(width)x\(height) @ \(Int(fps))fps, \(bitrate)kbps")
+
+        // Start frame scheduler — fixed interval send clock
+        let intervalNs = UInt64(1_000_000_000 / fps)
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "scheduler", qos: .userInteractive))
+        timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(intervalNs)))
+        timer.setEventHandler { [weak self] in
+            guard let self = self, let webrtc = self.webrtc else { return }
+            self.frameLock.lock()
+            let frame = self.latestFrame
+            self.latestFrame = nil
+            self.frameLock.unlock()
+
+            if let frame = frame {
+                webrtc.sendH264(frame, timestamp: self.rtpTimestamp)
+                self.rtpTimestamp &+= self.rtpStep
+            }
+        }
+        timer.resume()
+        schedulerTimer = timer
     }
 
     func setBitrate(_ bps: Int) {
@@ -235,17 +264,16 @@ class H264Encoder {
 
         VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: timestamp,
             duration: .invalid, frameProperties: props, infoFlagsOut: &flags) { [weak self] status, _, sb in
-            guard status == noErr, let sb = sb, let self = self, let webrtc = self.webrtc else { return }
-            // Build Annex-B synchronously (CMSampleBuffer recycled after callback)
+            guard status == noErr, let sb = sb, let self = self else { return }
             let annexB = self.buildAnnexB(sb)
             if !annexB.isEmpty {
-                // Send directly — encode callback is already on a dedicated queue
-                // No async dispatch = no scheduling delay
-                webrtc.sendH264(annexB)
+                // Push to scheduler queue — timer will send at fixed interval
+                self.frameLock.lock()
+                self.latestFrame = annexB
+                self.frameLock.unlock()
             }
         }
     }
-    var lastRembApplied: Int = 0
 
     private func buildAnnexB(_ sb: CMSampleBuffer) -> Data {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sb) else { return Data() }
