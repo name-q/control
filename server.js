@@ -193,7 +193,6 @@ wss.on('connection', (ws) => {
 
         case 'stats':
           break;
-        }
 
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
