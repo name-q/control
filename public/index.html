@@ -9,9 +9,9 @@
 html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;background:#000}
 
 /* Force landscape via CSS rotation when in portrait */
-#app{width:100vw;height:100vh;position:relative;overflow:hidden}
+#app{width:100vw;height:100vh;height:100dvh;position:relative;overflow:hidden}
 @media (orientation: portrait){
-  #app{width:100vh;height:100vw;transform:rotate(90deg);transform-origin:top left;position:absolute;top:0;left:100vw;overflow:visible}
+  #app{width:100vh;width:100dvh;height:100vw;height:100dvw;transform:rotate(90deg);transform-origin:top left;position:absolute;top:0;left:100vw;left:100dvw;overflow:visible}
 }
 
 /* Screen stream */
@@ -26,6 +26,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 /* Status */
 #status{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:20;font-size:11px;padding:3px 12px;border-radius:10px;background:rgba(0,0,0,.5);color:#0f0;backdrop-filter:blur(4px);cursor:pointer;white-space:nowrap}
 #status.disconnected{color:#f55}
+#fullscreenBtn{position:absolute;top:8px;left:max(12px,env(safe-area-inset-left));z-index:20;width:32px;height:32px;border-radius:8px;border:none;background:rgba(255,255,255,.1);color:rgba(255,255,255,.7);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 #qualityBadge{position:absolute;top:8px;right:max(12px,env(safe-area-inset-right));z-index:20;font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;backdrop-filter:blur(4px);cursor:pointer;letter-spacing:0.5px}
 
 /* Joystick */
@@ -74,6 +75,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 </head>
 <body>
 <div id="app">
+  <button id="fullscreenBtn">⛶</button>
   <div id="status" class="disconnected">Connecting...</div>
   <div id="qualityBadge">HD</div>
   <div id="screenCanvas">
@@ -113,12 +115,11 @@ const MULTI_TOUCH_DELAY = 80;
 // original (portrait) coordinate system. This function maps them to the
 // rotated (landscape) coordinate system that the layout uses.
 function isPortrait() { return window.innerHeight > window.innerWidth; }
+function getVW() { return window.visualViewport ? window.visualViewport.width : window.innerWidth; }
+function getVH() { return window.visualViewport ? window.visualViewport.height : window.innerHeight; }
 function mapTouch(t) {
   if (isPortrait()) {
-    // CSS: rotate(90deg), origin top-left, left:100vw
-    // Portrait screen: physical W < H. After rotation the "app" is H wide, W tall.
-    // Touch (cx, cy) in portrait → (cy, W - cx) in rotated layout
-    return { x: t.clientY, y: window.innerWidth - t.clientX };
+    return { x: t.clientY, y: getVW() - t.clientX };
   }
   return { x: t.clientX, y: t.clientY };
 }
@@ -801,6 +802,26 @@ function initComboPanel() {
   buildKeyboard();
 }
 initComboPanel();
+
+// ========== Fullscreen ==========
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+fullscreenBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const el = document.documentElement;
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    fullscreenBtn.textContent = '⛶';
+  } else {
+    (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    fullscreenBtn.textContent = '✕';
+  }
+});
+document.addEventListener('fullscreenchange', () => {
+  fullscreenBtn.textContent = document.fullscreenElement ? '✕' : '⛶';
+});
+document.addEventListener('webkitfullscreenchange', () => {
+  fullscreenBtn.textContent = document.webkitFullscreenElement ? '✕' : '⛶';
+});
 </script>
 </body>
 </html>
