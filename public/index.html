@@ -67,6 +67,37 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 .kb-key:active{background:rgba(255,255,255,.15)}
 .kb-key.modifier{color:rgba(160,185,255,.85)}
 
+/* File browser */
+#fileBtn{position:absolute;top:8px;left:max(52px,calc(env(safe-area-inset-left) + 44px));z-index:20;width:32px;height:32px;border-radius:8px;border:none;background:rgba(255,255,255,.1);color:rgba(255,255,255,.7);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#filePanel{position:absolute;top:0;left:0;bottom:0;width:70%;max-width:320px;z-index:40;background:rgba(15,15,30,.92);backdrop-filter:blur(10px);transform:translateX(-100%);transition:transform .25s ease-out;display:flex;flex-direction:column;overflow:hidden}
+#filePanel.open{transform:translateX(0)}
+#filePanelHeader{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0}
+#filePath{font-size:11px;color:rgba(255,255,255,.5);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+#fileClose{width:28px;height:28px;border:none;background:none;color:rgba(255,255,255,.5);font-size:16px;cursor:pointer}
+#fileTree{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 0;font-size:12px}
+.ft-item{display:flex;align-items:center;padding:6px 10px;cursor:pointer;color:rgba(255,255,255,.8)}
+.ft-item:active{background:rgba(255,255,255,.08)}
+.ft-item .ft-icon{width:20px;text-align:center;margin-right:6px;font-size:14px;flex-shrink:0}
+.ft-item .ft-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ft-item .ft-size{font-size:10px;color:rgba(255,255,255,.3);margin-left:6px}
+.ft-item.dir .ft-name{color:rgba(130,170,255,.9)}
+.ft-back{color:rgba(255,255,255,.4);font-size:11px}
+
+/* Editor */
+#editorPanel{position:absolute;inset:0;z-index:50;background:rgba(10,10,25,.97);display:none;flex-direction:column}
+#editorPanel.open{display:flex}
+#editorHeader{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0}
+#editorFileName{font-size:12px;color:rgba(255,255,255,.7);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+#editorClose{width:28px;height:28px;border:none;background:none;color:rgba(255,255,255,.5);font-size:16px;cursor:pointer}
+#editorContent{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;font-family:'SF Mono',Menlo,Monaco,monospace;font-size:12px;line-height:1.5;padding:0;counter-reset:line}
+.ed-line{display:flex;padding:1px 8px;min-height:18px;cursor:pointer}
+.ed-line:active{background:rgba(255,255,255,.05)}
+.ed-linenum{width:36px;text-align:right;color:rgba(255,255,255,.2);margin-right:8px;flex-shrink:0;user-select:none;font-size:11px}
+.ed-text{flex:1;white-space:pre-wrap;word-break:break-all;color:rgba(255,255,255,.85)}
+.ed-line.modified{background:rgba(80,180,80,.1);border-left:2px solid rgba(80,180,80,.5)}
+#editorLoadMore{text-align:center;padding:12px;color:rgba(255,255,255,.3);font-size:11px;cursor:pointer;display:none}
+#editorLoadMore:active{color:rgba(255,255,255,.6)}
+
 </style>
 </head>
 <body>
@@ -98,6 +129,22 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
     </div>
     <div id="comboQuick"></div>
     <div id="comboKeyboard"></div>
+  </div>
+  <button id="fileBtn">📁</button>
+  <div id="filePanel">
+    <div id="filePanelHeader">
+      <span id="filePath">/</span>
+      <button id="fileClose">✕</button>
+    </div>
+    <div id="fileTree"></div>
+  </div>
+  <div id="editorPanel">
+    <div id="editorHeader">
+      <span id="editorFileName"></span>
+      <button id="editorClose">✕</button>
+    </div>
+    <div id="editorContent"></div>
+    <div id="editorLoadMore">Load more...</div>
   </div>
 </div>
 <script>
@@ -234,6 +281,7 @@ function connect() {
       const msg = JSON.parse(e.data);
       if (msg.type === 'screen') { screenSize = msg.data; serverPlatform = msg.data.platform || 'darwin'; initComboPanel(); }
       if (msg.type === 'cursor') updateCursor(msg.data);
+      if (msg.type?.startsWith('fs.')) handleFsMessage(msg);
       if (msg.type === 'offer') handleServerOffer(msg.sdp);
       if (msg.type === 'ice') handleRemoteIce(msg.candidate);
     } catch {}
@@ -798,6 +846,159 @@ function initComboPanel() {
   buildKeyboard();
 }
 initComboPanel();
+
+// ========== File Browser ==========
+const fileBtn = document.getElementById('fileBtn');
+const filePanel = document.getElementById('filePanel');
+const fileTree = document.getElementById('fileTree');
+const filePathEl = document.getElementById('filePath');
+const fileCloseBtn = document.getElementById('fileClose');
+let currentDir = '.';
+
+fileBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  filePanel.classList.toggle('open');
+  if (filePanel.classList.contains('open')) loadDir('.');
+});
+fileCloseBtn.addEventListener('click', () => filePanel.classList.remove('open'));
+filePanel.addEventListener('touchstart', (e) => e.stopPropagation());
+filePanel.addEventListener('touchmove', (e) => e.stopPropagation());
+
+function loadDir(dir) {
+  currentDir = dir;
+  filePathEl.textContent = dir === '.' ? '/' : '/' + dir;
+  wsSend('fs.list', { path: dir });
+}
+
+function renderFileTree(entries) {
+  fileTree.innerHTML = '';
+  // Back button (if not root)
+  if (currentDir !== '.') {
+    const back = document.createElement('div');
+    back.className = 'ft-item ft-back';
+    back.innerHTML = '<span class="ft-icon">←</span><span class="ft-name">..</span>';
+    back.addEventListener('click', () => {
+      const parent = currentDir.split('/').slice(0, -1).join('/') || '.';
+      loadDir(parent);
+    });
+    fileTree.appendChild(back);
+  }
+  for (const entry of entries) {
+    const item = document.createElement('div');
+    item.className = 'ft-item' + (entry.type === 'dir' ? ' dir' : '');
+    const icon = entry.type === 'dir' ? '📁' : (entry.binary ? '📦' : '📄');
+    const size = entry.size != null ? formatFileSize(entry.size) : '';
+    item.innerHTML = `<span class="ft-icon">${icon}</span><span class="ft-name">${escHtml(entry.name)}</span><span class="ft-size">${size}</span>`;
+    item.addEventListener('click', () => {
+      const entryPath = currentDir === '.' ? entry.name : currentDir + '/' + entry.name;
+      if (entry.type === 'dir') {
+        loadDir(entryPath);
+      } else if (!entry.binary) {
+        openEditor(entryPath);
+      }
+    });
+    fileTree.appendChild(item);
+  }
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'K';
+  return (bytes / 1024 / 1024).toFixed(1) + 'M';
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ========== Editor ==========
+const editorPanel = document.getElementById('editorPanel');
+const editorFileName = document.getElementById('editorFileName');
+const editorCloseBtn = document.getElementById('editorClose');
+const editorContent = document.getElementById('editorContent');
+const editorLoadMore = document.getElementById('editorLoadMore');
+let editorPath = '', editorLines = [], editorOffset = 0, editorTotal = 0, editorModified = '';
+
+function openEditor(filePath) {
+  editorPath = filePath;
+  editorLines = [];
+  editorOffset = 0;
+  editorFileName.textContent = filePath.split('/').pop();
+  editorContent.innerHTML = '';
+  editorPanel.classList.add('open');
+  filePanel.classList.remove('open');
+  wsSend('fs.read', { path: filePath, offset: 0, limit: 200 });
+}
+
+editorCloseBtn.addEventListener('click', () => editorPanel.classList.remove('open'));
+editorPanel.addEventListener('touchstart', (e) => e.stopPropagation());
+editorPanel.addEventListener('touchmove', (e) => e.stopPropagation());
+
+editorLoadMore.addEventListener('click', () => {
+  if (editorOffset < editorTotal) {
+    wsSend('fs.read', { path: editorPath, offset: editorOffset, limit: 200 });
+  }
+});
+
+function renderEditorPage(data) {
+  editorTotal = data.totalLines;
+  editorModified = data.modified;
+  const lines = data.content.split('\n');
+  const startLine = data.offset + 1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineNum = startLine + i;
+    editorLines.push(lines[i]);
+    const div = document.createElement('div');
+    div.className = 'ed-line';
+    div.dataset.line = lineNum;
+    div.innerHTML = `<span class="ed-linenum">${lineNum}</span><span class="ed-text">${escHtml(lines[i])}</span>`;
+    div.addEventListener('click', () => editLine(lineNum, div));
+    editorContent.appendChild(div);
+  }
+
+  editorOffset = data.offset + lines.length;
+  editorLoadMore.style.display = editorOffset < editorTotal ? 'block' : 'none';
+}
+
+function editLine(lineNum, div) {
+  const textEl = div.querySelector('.ed-text');
+  const currentText = editorLines[lineNum - 1] || '';
+  const input = document.createElement('textarea');
+  input.value = currentText;
+  input.style.cssText = 'width:100%;min-height:36px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(74,105,189,.5);border-radius:4px;font-family:inherit;font-size:12px;padding:4px;resize:vertical;outline:none';
+  textEl.replaceWith(input);
+  input.focus();
+
+  const save = () => {
+    const newText = input.value;
+    if (newText !== currentText) {
+      // Send diff
+      wsSend('fs.edit', { path: editorPath, edits: [{ line: lineNum, action: 'replace', content: newText }], baseModified: editorModified });
+      editorLines[lineNum - 1] = newText;
+      div.classList.add('modified');
+    }
+    const span = document.createElement('span');
+    span.className = 'ed-text';
+    span.textContent = newText;
+    input.replaceWith(span);
+  };
+
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); input.blur(); }
+    e.stopPropagation();
+  });
+  input.addEventListener('touchstart', (e) => e.stopPropagation());
+}
+
+// Handle fs responses in WebSocket
+function handleFsMessage(msg) {
+  if (msg.type === 'fs.list' && msg.data) renderFileTree(msg.data.entries || []);
+  if (msg.type === 'fs.read' && msg.data && !msg.data.error) renderEditorPage(msg.data);
+  if (msg.type === 'fs.edit' && msg.data) {
+    if (msg.data.success) editorModified = msg.data.modified;
+    else if (msg.data.error) alert(msg.data.error);
+  }
+}
 
 // ========== Fullscreen ==========
 const fullscreenBtn = document.getElementById('fullscreenBtn');

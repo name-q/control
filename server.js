@@ -41,6 +41,7 @@ ensureCaptureBuild();
 
 const mouse = require('./mouse');
 const { createStream } = require('./stream');
+const filemanager = require('./filemanager');
 
 const PORT = process.env.PORT || 9000;
 
@@ -197,6 +198,13 @@ wss.on('connection', (ws) => {
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
           break;
+
+        // File system operations
+        case 'fs.list': case 'fs.read': case 'fs.edit': case 'fs.info': case 'fs.setRoot': {
+          const result = filemanager.handleMessage(msg);
+          if (result) ws.send(JSON.stringify(result));
+          break;
+        }
 
         // Input commands
         default:
