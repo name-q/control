@@ -11,7 +11,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 /* Force landscape via CSS rotation when in portrait */
 #app{width:100vw;height:100vh;position:relative;overflow:hidden}
 @media (orientation: portrait){
-  #app{width:100vh;height:100vw;transform:rotate(90deg);transform-origin:top left;position:absolute;top:0;left:100vw}
+  #app{width:100vh;height:100vw;transform:rotate(90deg);transform-origin:top left;position:absolute;top:0;left:100vw;overflow:visible}
 }
 
 /* Screen stream */
@@ -26,7 +26,7 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 /* Status */
 #status{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:20;font-size:11px;padding:3px 12px;border-radius:10px;background:rgba(0,0,0,.5);color:#0f0;backdrop-filter:blur(4px);cursor:pointer;white-space:nowrap}
 #status.disconnected{color:#f55}
-#qualityBadge{position:absolute;top:8px;right:12px;z-index:20;font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;backdrop-filter:blur(4px);cursor:pointer;letter-spacing:0.5px}
+#qualityBadge{position:absolute;top:8px;right:max(12px,env(safe-area-inset-right));z-index:20;font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;backdrop-filter:blur(4px);cursor:pointer;letter-spacing:0.5px}
 
 /* Joystick */
 #joystickArea{position:absolute;bottom:20px;left:20px;z-index:20;width:120px;height:120px}
@@ -34,9 +34,9 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 #joystickThumb{width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.25);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);transition:none}
 
 /* Keyboard input */
-#comboBtn{position:absolute;bottom:80px;right:20px;z-index:20;width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
-#kbBtn{position:absolute;bottom:28px;right:20px;z-index:20;width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
-#kbPanel{position:absolute;bottom:80px;right:12px;z-index:20;display:none;flex-direction:row;align-items:center;gap:6px;background:rgba(0,0,0,.7);padding:8px;border-radius:12px;backdrop-filter:blur(8px)}
+#comboBtn{position:absolute;bottom:80px;right:max(20px,env(safe-area-inset-right));z-index:20;width:40px;height:40px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#kbBtn{position:absolute;bottom:28px;right:max(20px,env(safe-area-inset-right));z-index:20;width:40px;height:40px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:rgba(255,255,255,.08);color:#fff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#kbPanel{position:absolute;bottom:80px;right:max(12px,env(safe-area-inset-right));z-index:20;display:none;flex-direction:row;align-items:center;gap:6px;background:rgba(0,0,0,.7);padding:8px;border-radius:12px;backdrop-filter:blur(8px)}
 #kbPanel.open{display:flex}
 #kbInput{width:200px;height:36px;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.1);color:#fff;font-size:14px;padding:0 10px;outline:none}
 #kbSend{height:36px;padding:0 14px;border:none;border-radius:8px;background:#4a69bd;color:#fff;font-size:13px;font-weight:600;cursor:pointer}
