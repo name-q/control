@@ -72,18 +72,13 @@ class WebRTCManager {
         rtcSetStateChangeCallback(pcId) { pc, state, ptr in
             let states = ["new","connecting","connected","disconnected","failed","closed"]
             let s = state >= 0 && state < states.count ? states[Int(state)] : "unknown"
-            log("[webrtc] connection: \(s)")
+            if state == 2 || state >= 4 { log("[webrtc] \(s)") } // only log connected/failed/closed
         }
 
-        rtcSetIceStateChangeCallback(pcId) { pc, state, ptr in
-            let states = ["new","checking","connected","completed","failed","disconnected","closed"]
-            let s = state >= 0 && state < states.count ? states[Int(state)] : "unknown"
-            log("[webrtc] ICE: \(s)")
-        }
+        rtcSetIceStateChangeCallback(pcId) { pc, state, ptr in }
 
         // DataChannel callback (browser creates it for input)
         rtcSetDataChannelCallback(pcId) { pc, dc, ptr in
-            log("[webrtc] DataChannel received")
             rtcSetMessageCallback(dc) { id, msg, size, ptr in
                 // Forward to stdout for Node to handle
                 guard let msg = msg else { return }
@@ -140,9 +135,7 @@ class WebRTCManager {
             rembBitrate = bitrate
         }
 
-        rtcSetOpenCallback(trackId) { id, ptr in
-            log("[webrtc] Track open")
-        }
+        rtcSetOpenCallback(trackId) { id, ptr in }
 
         log("[webrtc] H264 track added, id=\(trackId)")
     }
@@ -465,7 +458,6 @@ func handleStdinCommand(_ json: String, webrtc: WebRTCManager, encoder: inout H2
     case "answer":
         if let sdp = obj["sdp"] as? String {
             webrtc.setRemoteDescription(sdp, type: "answer")
-            log("[stdin] Answer applied")
         }
     case "ice":
         if let cand = obj["candidate"] as? [String: Any],
