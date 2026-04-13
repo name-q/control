@@ -44,29 +44,25 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 
 #comboBackdrop{display:none;position:absolute;inset:0;z-index:25;background:rgba(0,0,0,.15)}
 #comboBackdrop.open{display:block}
-#comboPanel{position:absolute;bottom:0;left:0;right:0;z-index:30;max-height:45%;background:rgba(20,20,40,.45);border-top:1px solid rgba(255,255,255,.08);border-radius:14px 14px 0 0;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transform:translateY(100%);transition:transform .25s ease-out;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 6px;padding-bottom:max(6px,env(safe-area-inset-bottom))}
+#comboPanel{position:absolute;bottom:0;left:0;right:0;z-index:30;max-height:55%;background:rgba(20,20,40,.45);border-top:1px solid rgba(255,255,255,.08);border-radius:14px 14px 0 0;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transform:translateY(100%);transition:transform .25s ease-out;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px 4px;padding-bottom:max(4px,env(safe-area-inset-bottom))}
 #comboPanel.open{transform:translateY(0)}
-#comboPanelHeader{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;padding:0 2px}
-#comboPreview{flex:1;font-size:13px;color:rgba(255,255,255,.4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#comboPanelHeader{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;padding:0 2px}
+#comboPreview{flex:1;font-size:12px;color:rgba(255,255,255,.4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #comboPreview.active{color:#fff;font-weight:600}
 #comboPanelActions{display:flex;gap:6px}
-#comboClear,#comboSend{height:30px;padding:0 12px;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer}
+#comboClear,#comboSend{height:26px;padding:0 10px;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer}
 #comboClear{background:rgba(255,255,255,.1);color:rgba(255,255,255,.6)}
 #comboSend{background:#4a69bd;color:#fff}
-#comboQuick{display:flex;gap:5px;overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch;scrollbar-width:none;justify-content:center}
+#comboQuick{display:flex;gap:4px;overflow-x:auto;padding:2px 0 4px;-webkit-overflow-scrolling:touch;scrollbar-width:none;justify-content:center}
 #comboQuick::-webkit-scrollbar{display:none}
 .combo-chip{flex-shrink:0;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.75);font-size:10px;white-space:nowrap;cursor:pointer}
 .combo-chip:active{background:rgba(74,105,189,.4)}
-#comboKeyboard{display:flex;flex-direction:column;gap:2px;align-items:center}
-.kb-row{display:flex;gap:2px;justify-content:center}
-.kb-key{height:26px;min-width:0;width:calc((100vw - 40px) / 14);max-width:32px;padding:0 1px;border-radius:4px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:rgba(255,255,255,.75);font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
-@media (orientation: portrait){.kb-key{width:calc((100vh - 40px) / 14)}}
-.kb-key.wide{width:calc((100vw - 40px) / 11);max-width:44px}
-@media (orientation: portrait){.kb-key.wide{width:calc((100vh - 40px) / 11)}}
-.kb-key.wider{width:calc((100vw - 40px) / 9);max-width:52px}
-@media (orientation: portrait){.kb-key.wider{width:calc((100vh - 40px) / 9)}}
-.kb-key.space{width:calc((100vw - 40px) / 5);max-width:100px}
-@media (orientation: portrait){.kb-key.space{width:calc((100vh - 40px) / 5)}}
+#comboKeyboard{display:flex;flex-direction:column;gap:2px;align-items:center;width:100%}
+.kb-row{display:flex;gap:2px;justify-content:center;width:100%}
+.kb-key{height:24px;flex:1;max-width:36px;padding:0 1px;border-radius:4px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:rgba(255,255,255,.75);font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.kb-key.wide{max-width:44px;flex:1.4}
+.kb-key.wider{max-width:52px;flex:1.8}
+.kb-key.space{max-width:120px;flex:4}
 .kb-key.selected{background:rgba(74,105,189,.5);border-color:rgba(74,105,189,.8);color:#fff}
 .kb-key:active{background:rgba(255,255,255,.15)}
 .kb-key.modifier{color:rgba(160,185,255,.85)}
