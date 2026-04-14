@@ -858,7 +858,10 @@ let currentDir = '.';
 fileBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   filePanel.classList.toggle('open');
-  if (filePanel.classList.contains('open')) loadDir('.');
+  if (filePanel.classList.contains('open')) {
+    const saved = localStorage.getItem('lastDir');
+    loadDir(saved || '/');
+  }
 });
 fileCloseBtn.addEventListener('click', () => filePanel.classList.remove('open'));
 filePanel.addEventListener('touchstart', (e) => e.stopPropagation());
@@ -866,20 +869,21 @@ filePanel.addEventListener('touchmove', (e) => e.stopPropagation());
 
 function loadDir(dir) {
   currentDir = dir;
-  filePathEl.textContent = dir === '.' ? '/' : '/' + dir;
+  filePathEl.textContent = dir === '/' ? '/' : dir;
   wsSend('fs.list', { path: dir });
 }
 
 function renderFileTree(entries) {
   fileTree.innerHTML = '';
   // Back button (if not root)
-  if (currentDir !== '.') {
+  if (currentDir !== '/') {
     const back = document.createElement('div');
     back.className = 'ft-item ft-back';
     back.innerHTML = '<span class="ft-icon">←</span><span class="ft-name">..</span>';
     back.addEventListener('click', () => {
-      const parent = currentDir.split('/').slice(0, -1).join('/') || '.';
-      loadDir(parent);
+      const parts = currentDir.split('/').filter(Boolean);
+      parts.pop();
+      loadDir(parts.length ? '/' + parts.join('/') : '/');
     });
     fileTree.appendChild(back);
   }
@@ -890,7 +894,7 @@ function renderFileTree(entries) {
     const size = entry.size != null ? formatFileSize(entry.size) : '';
     item.innerHTML = `<span class="ft-icon">${icon}</span><span class="ft-name">${escHtml(entry.name)}</span><span class="ft-size">${size}</span>`;
     item.addEventListener('click', () => {
-      const entryPath = currentDir === '.' ? entry.name : currentDir + '/' + entry.name;
+      const entryPath = currentDir === '/' ? '/' + entry.name : currentDir + '/' + entry.name;
       if (entry.type === 'dir') {
         loadDir(entryPath);
       } else if (!entry.binary) {
@@ -992,8 +996,20 @@ function editLine(lineNum, div) {
 
 // Handle fs responses in WebSocket
 function handleFsMessage(msg) {
-  if (msg.type === 'fs.list' && msg.data) renderFileTree(msg.data.entries || []);
-  if (msg.type === 'fs.read' && msg.data && !msg.data.error) renderEditorPage(msg.data);
+  if (msg.type === 'fs.list' && msg.data) {
+    if (msg.data.error) {
+      // Failed to read directory — clear history, go to root
+      localStorage.removeItem('lastDir');
+      if (currentDir !== '/') loadDir('/');
+    } else {
+      localStorage.setItem('lastDir', currentDir);
+      renderFileTree(msg.data.entries || []);
+    }
+  }
+  if (msg.type === 'fs.read' && msg.data) {
+    if (msg.data.error) alert(msg.data.error);
+    else renderEditorPage(msg.data);
+  }
   if (msg.type === 'fs.edit' && msg.data) {
     if (msg.data.success) editorModified = msg.data.modified;
     else if (msg.data.error) alert(msg.data.error);
