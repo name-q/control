@@ -3,7 +3,7 @@ const path = require('path');
 const os = require('os');
 
 // Root directory — defaults to home, can be overridden
-let rootDir = process.cwd();
+let rootDir = '/';
 
 // Binary file extensions
 const BINARY_EXTS = new Set([

@@ -201,7 +201,7 @@ wss.on('connection', (ws) => {
 
         // File system operations
         case 'fs.list': case 'fs.read': case 'fs.edit': case 'fs.info': case 'fs.setRoot': {
-          const result = filemanager.handleMessage(msg);
+          const result = filemanager.handleMessage({ type: msg.type, ...msg.data });
           if (result) ws.send(JSON.stringify(result));
           break;
         }
