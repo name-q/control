@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Remote Control</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;touch-action:none;-webkit-user-select:none;user-select:none}
-html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;background:#000}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none}
+html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;background:#000;touch-action:none}
 
 /* Force landscape via CSS rotation when in portrait */
 #app{width:100vw;height:100vh;height:100dvh;position:relative;overflow:hidden}
@@ -69,12 +69,12 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 
 /* File browser */
 #fileBtn{position:absolute;top:8px;left:max(52px,calc(env(safe-area-inset-left) + 44px));z-index:20;width:32px;height:32px;border-radius:8px;border:none;background:rgba(255,255,255,.1);color:rgba(255,255,255,.7);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
-#filePanel{position:absolute;top:0;left:0;bottom:0;width:70%;max-width:320px;z-index:40;background:rgba(15,15,30,.92);backdrop-filter:blur(10px);transform:translateX(-100%);transition:transform .25s ease-out;display:flex;flex-direction:column;overflow:hidden}
+#filePanel{position:absolute;top:0;left:0;bottom:0;width:70%;max-width:320px;z-index:40;background:rgba(15,15,30,.92);backdrop-filter:blur(10px);transform:translateX(-100%);transition:transform .25s ease-out;display:flex;flex-direction:column;overflow:hidden;touch-action:auto}
 #filePanel.open{transform:translateX(0)}
 #filePanelHeader{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0}
 #filePath{font-size:11px;color:rgba(255,255,255,.5);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 #fileClose{width:28px;height:28px;border:none;background:none;color:rgba(255,255,255,.5);font-size:16px;cursor:pointer}
-#fileTree{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 0;font-size:12px;touch-action:pan-y}
+#fileTree{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 0;font-size:12px;touch-action:auto;overscroll-behavior:contain}
 .ft-item{display:flex;align-items:center;padding:6px 10px;cursor:pointer;color:rgba(255,255,255,.8)}
 .ft-item:active{background:rgba(255,255,255,.08)}
 .ft-item .ft-icon{width:20px;text-align:center;margin-right:6px;font-size:14px;flex-shrink:0}
@@ -84,12 +84,12 @@ html,body{height:100%;overflow:hidden;font-family:-apple-system,sans-serif;backg
 .ft-back{color:rgba(255,255,255,.4);font-size:11px}
 
 /* Editor */
-#editorPanel{position:absolute;inset:0;z-index:50;background:rgba(10,10,25,.97);display:none;flex-direction:column}
+#editorPanel{position:absolute;inset:0;z-index:50;background:rgba(10,10,25,.97);display:none;flex-direction:column;touch-action:auto}
 #editorPanel.open{display:flex}
 #editorHeader{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0}
 #editorFileName{font-size:12px;color:rgba(255,255,255,.7);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 #editorClose{width:28px;height:28px;border:none;background:none;color:rgba(255,255,255,.5);font-size:16px;cursor:pointer}
-#editorContent{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;font-family:'SF Mono',Menlo,Monaco,monospace;font-size:12px;line-height:1.5;padding:0;counter-reset:line;touch-action:pan-y}
+#editorContent{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;font-family:'SF Mono',Menlo,Monaco,monospace;font-size:12px;line-height:1.5;padding:0;counter-reset:line;touch-action:auto;overscroll-behavior:contain;-webkit-user-select:text;user-select:text}
 .ed-line{display:flex;padding:1px 8px;min-height:18px;cursor:pointer}
 .ed-line:active{background:rgba(255,255,255,.05)}
 .ed-linenum{width:36px;text-align:right;color:rgba(255,255,255,.2);margin-right:8px;flex-shrink:0;user-select:none;font-size:11px}

@@ -50,7 +50,8 @@ function listDir(reqPath, showHidden) {
     const result = [];
 
     for (const entry of entries) {
-      if (!showHidden && (entry.name.startsWith('.') || HIDDEN_DIRS.has(entry.name))) continue;
+      // Only hide known heavy directories, show everything else including dotfiles
+      if (HIDDEN_DIRS.has(entry.name)) continue;
       if (result.length >= MAX_DIR_ENTRIES) break;
 
       const entryPath = path.join(fullPath, entry.name);
